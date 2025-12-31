@@ -1,7 +1,7 @@
 {
-  "name": "Defold GUI Export",
+  "name": "FigFold",
   "version": "1.0.0",
-  "description": "Defold GUI Export",
+  "description": "Figma To Defold ui export!",
   "main": "code.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
