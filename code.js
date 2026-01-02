@@ -1,5 +1,5 @@
 // если в названии есть [exclude] - не работает со слоем
-// если в названии есть [p] - это парнет - группирует в себе другие объекты
+// все FRAME обрабатываются как контейнеры (рекурсивно)
 
 // Динамические настройки (загружаются из UI)
 var SCALE = 1;
@@ -28,6 +28,7 @@ var textsForTranslation = [];
 var emptyContainerIds = new Set();
 var templateGuiFiles = []; // { name: string, content: string }
 var processedComponentIds = new Set(); // Track unique components to avoid duplicate templates
+var exportedComponentIds = new Set(); // Track exported component images to avoid duplicates
 var addedHiddenTemplates = new Set(); // Track which templates are already added hidden on scene
 var instanceDataForClone = []; // { templateName, instanceId, x, y, textContent } for code generation
 var layoutContainers = new Map(); // Store AutoLayout frame data: { id, mode, margin, padding }
@@ -114,100 +115,176 @@ async function exportLayer(node) {
 
         if (child.type !== "TEXT" && child.name !== "[exclude]") {
             try {
-                // Если это parent - содержит [p]
-                if (child.name.includes("[p]") && child.children) {
-                    for (let grandchild of child.children) {
-                        grandchild.visible = false;
+                // Helper: Recursive check if node contains ANY layout elements (FRAME, INSTANCE, SECTION, TEXT)
+                // This determines if a container should be treated as a Layout (recurse) or Visual Asset (bake)
+                // Groups are traversed transparently to see what's inside.
+                function hasLayoutChildren(node) {
+                    if (!node.children) return false;
+                    return node.children.some(c => {
+                        // Added TEXT here - if a frame contains Text, it's a layout (e.g. Button)
+                        // We want to separate the Text from the Background.
+                        if (c.type === 'FRAME' || c.type === 'INSTANCE' || c.type === 'SECTION' || c.type === 'TEXT') return true;
+                        if (c.type === 'GROUP') return hasLayoutChildren(c);
+                        return false;
+                    });
+                }
+
+                // Helper: Recursive check if node contains ANY visual elements that should be baked
+                function hasVisualChildren(node) {
+                    if (!node.children) return false;
+                    return node.children.some(c => {
+                         if (!c.visible) return false;
+                         if (c.type === 'GROUP') return hasVisualChildren(c);
+                         return ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'TEXT'].includes(c.type);
+                    });
+                }
+                
+                // Helper: Smart hide - hides only Layout Elements (Frame, Instance, Text) to prepare for baking background.
+                // Keeps primitives visible so they merge into the background image.
+                // Returns array of hidden elements to restore later.
+                function hideLayoutElements(container) {
+                    let hidden = [];
+                    
+                    function process(node) {
+                        if (!node.children) return;
+                        for (let c of node.children) {
+                            // If element is already hidden, skip
+                            if (!c.visible) continue;
+                            
+                            const isLayoutElement = c.type === 'FRAME' || c.type === 'INSTANCE' || c.type === 'SECTION' || c.type === 'TEXT';
+                            
+                            if (isLayoutElement) {
+                                c.visible = false;
+                                hidden.push(c);
+                            } else if (c.type === 'GROUP') {
+                                // For groups, we dig deeper to hide layout items inside, but keep the group itself visible
+                                // (unless the group itself needs hiding logic, but usually group is just a pass-through)
+                                process(c);
+                            }
+                            // Primitives are left visible!
+                        }
                     }
+                    process(container);
+                    return hidden;
+                }
+                
+                // Determine if this is a Layout Container or a Visual Asset
+                const isLayout = hasLayoutChildren(child);
+                const hasVisuals = hasVisualChildren(child);
+                const isEmpty = isEmptyContainer(child);
+                
+                // --- HANDLING FOR GROUPS ---
+                if (child.type === "GROUP") {
+                    if (child.children && child.children.length > 0) {
+                        await exportLayer(child);
+                    }
+                    continue; 
                 }
 
-                if (child.name.includes("[corner]")) {
-                    originalSizes[child.id] = {
-                        width: child.width,
-                        height: child.height,
-                    };
+                // --- HANDLING FOR FRAMES ---
+                if (child.type === "FRAME") {
+                    // 1. EMPTY CONTAINER (Layout or Spacer)
+                    if (isEmpty && (isLayout || !hasVisuals)) {
+                        emptyContainerIds.add(child.id);
+                        if (child.children && child.children.length > 0) {
+                            await exportLayer(child);
+                        }
+                        continue; 
+                    }
 
-                    const newSize = child.cornerRadius * 2;
-                    child.resize(newSize, newSize);
-                }
+                    // 2. LAYOUT CONTAINER WITH BACKGROUND
+                    let hiddenElements = [];
+                    if (isLayout) {
+                        // Smart hide: Hide Text/Frames, keep Shapes
+                        hiddenElements = hideLayoutElements(child);
+                    }
+                    
+                    // 3. EXPORT IMAGE (Background + Shapes)
+                    // -- EXPORT SECTION --
+                    if (child.name.includes("[corner]")) {
+                        originalSizes[child.id] = { width: child.width, height: child.height };
+                        const newSize = child.cornerRadius * 2;
+                        child.resize(newSize, newSize);
+                    }
 
-                // Check if this is an empty [p] container (only for parent nodes)
-                if (child.name.includes("[p]") && isEmptyContainer(child)) {
-                    // Track empty container, don't export full image
-                    emptyContainerIds.add(child.id);
-                } else {
                     const value = await child.exportAsync(exportSettings);
-
-                    // Удаление "[corner]" из имени файла
-                    const fileName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "") + ".png";
-
+                    const fileName = child.name.replace(/\[corner\]/g, "") + ".png";
                     all_atlas_images.push({
                         name: fileName,
                         value: value,
                     });
-                }
 
-                if (child.name.includes("[corner]")) {
-                    child.resize(originalSizes[child.id].width, originalSizes[child.id].height);
-                }
-
-                // Теперь если это было с [p] - нужно все включить и для каждого сделать тоже работу
-                if (child.name.includes("[p]") && child.children) {
-
-                    for (let grandchild of child.children) {
-                        grandchild.visible = true;
+                    if (child.name.includes("[corner]")) {
+                        child.resize(originalSizes[child.id].width, originalSizes[child.id].height);
                     }
-                    await exportLayer(child);
-                }
+                    // -- END EXPORT SECTION --
+
+                    // Restore & Recurse (for layouts)
+                    if (isLayout) {
+                        // Restore visibility
+                        for (let el of hiddenElements) {
+                            el.visible = true;
+                        }
+                        // Recurse to components inside
+                        await exportLayer(child);
+                    }
+                } // End FRAME handling
                 
-                // Export INSTANCE node's mainComponent as texture for templates
+                
+                // --- HANDLING FOR INSTANCES ---
                 if (child.type === "INSTANCE" && child.mainComponent) {
+                    console.log('[INSTANCE EXPORT]', child.name, 'component:', child.mainComponent.name);
                     const componentId = child.mainComponent.id;
                     const componentName = child.mainComponent.name.replace(/\[.*?\]/g, '').trim();
                     const instanceName = child.name;
                     const instanceId = instanceName.replace(/\[.*?\]/g, '').trim();
                     
-                    // Store state for restoration
+                    const isEmptyInstance = isEmptyContainer(child);
+                    
                     let hiddenChildren = [];
                     let originalSize = null;
                     
                     try {
-                        // Check if fills are different from mainComponent
-                        const isDifferent = fillsAreDifferent(child, child.mainComponent);
-                        
-                        // Apply [p] logic - hide children before export
-                        if (instanceName.includes("[p]") && child.children) {
-                            for (let grandchild of child.children) {
-                                if (grandchild.visible) {
-                                    hiddenChildren.push(grandchild);
-                                    grandchild.visible = false;
-                                }
+                        // 1. EMPTY CONTAINER (Layout or Spacer)
+                        if (isEmptyInstance && (isLayout || !hasVisuals)) {
+                            console.log('[INSTANCE EMPTY]', child.name, '- skipping image export');
+                            emptyContainerIds.add(child.id);
+                        } 
+                        // 2. EXPORT INSTANCE IMAGE
+                        else {
+                            // Check if fills are different from mainComponent
+                            const isDifferent = fillsAreDifferent(child, child.mainComponent);
+                            
+                            // Smart hide for layouts
+                            if (isLayout) {
+                                hiddenChildren = hideLayoutElements(child);
                             }
-                        }
-                        
-                        // Apply [corner] logic - resize to corner radius
-                        if (instanceName.includes("[corner]") && child.cornerRadius) {
-                            originalSize = { width: child.width, height: child.height };
-                            const newSize = child.cornerRadius * 2;
-                            child.resize(newSize, newSize);
-                        }
-                        
-                        // Export base component texture only once
-                        if (!processedComponentIds.has(componentId)) {
-                            const value = await child.exportAsync(exportSettings);
-                            all_atlas_images.push({
-                                name: componentName + '.png',
-                                value: value,
-                            });
-                        }
-                        
-                        // If instance has different fills, export with unique name
-                        if (isDifferent && instanceId !== componentName) {
-                            const value = await child.exportAsync(exportSettings);
-                            all_atlas_images.push({
-                                name: instanceId + '.png',
-                                value: value,
-                            });
+                            
+                            // Apply [corner] logic - resize to corner radius
+                            if (instanceName.includes("[corner]") && child.cornerRadius) {
+                                originalSize = { width: child.width, height: child.height };
+                                const newSize = child.cornerRadius * 2;
+                                child.resize(newSize, newSize);
+                            }
+                            
+                            // Export base component texture only once
+                            if (!exportedComponentIds.has(componentId)) {
+                                const value = await child.exportAsync(exportSettings);
+                                all_atlas_images.push({
+                                    name: componentName + '.png',
+                                    value: value,
+                                });
+                                exportedComponentIds.add(componentId); // Mark as exported
+                            }
+                            
+                            // If instance has different fills, export with unique name
+                            if (isDifferent && instanceId !== componentName) {
+                                const value = await child.exportAsync(exportSettings);
+                                all_atlas_images.push({
+                                    name: instanceId + '.png',
+                                    value: value,
+                                });
+                            }
                         }
                     } catch (err) {
                         console.error("Error exporting INSTANCE texture:", err);
@@ -217,10 +294,16 @@ async function exportLayer(node) {
                             child.resize(originalSize.width, originalSize.height);
                         }
                         
-                        // Always restore [p] children visibility
-                        for (let grandchild of hiddenChildren) {
-                            grandchild.visible = true;
+                        // Restore children visibility
+                        for (let el of hiddenChildren) {
+                            el.visible = true;
                         }
+                    }
+                    
+                    // Only recurse if it's a Layout.
+                    if (isLayout && child.children && child.children.length > 0) {
+                        console.log('[INSTANCE RECURSE]', child.name, 'is Layout, recursing into', child.children.length, 'children');
+                        await exportLayer(child);
                     }
                 }
             } catch (error) {
@@ -367,7 +450,7 @@ function parseNodeOfTree(node, parent_name) {
 
     for (let child of node.children) {
         if (child.name != "[exclude]") {
-            var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
+            var layerName = child.name.replace(/\[corner\]/g, "");
             var layerPosition = {
                 x: child.x,
                 y: child.y
@@ -450,7 +533,11 @@ function parseNodeOfTree(node, parent_name) {
                 continue; // Skip regular node creation - will be cloned from code
             }
 
-            
+            // Skip primitive shapes - they're exported as part of parent FRAME image
+            const primitiveTypes = ['ELLIPSE', 'RECTANGLE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION'];
+            if (primitiveTypes.includes(child.type)) {
+                continue; // Don't create separate node for shapes
+            }
 
             if (child.type === "TEXT") {
                 // Корректировка позиции для разных pivot (LEFT/RIGHT)
@@ -630,7 +717,11 @@ function parseNodeOfTree(node, parent_name) {
             guiContent += '  xanchor: XANCHOR_NONE\n';
             guiContent += ' yanchor: YANCHOR_NONE\n';
             guiContent += '  pivot: PIVOT_CENTER\n';
-            guiContent += ' adjust_mode: ADJUST_MODE_FIT\n';
+            if (isEmptyNode) {
+                 guiContent += ' adjust_mode: ADJUST_MODE_STRETCH\n';
+            } else {
+                 guiContent += ' adjust_mode: ADJUST_MODE_FIT\n';
+            }
             guiContent += '  layer: ""\n';
             guiContent += '  inherit_alpha: true\n';
 
@@ -685,7 +776,8 @@ function parseNodeOfTree(node, parent_name) {
 
         guiContent += '}\n';
 
-        if (child.name.includes("[p]") && child.children) {
+        // Если это FRAME - рекурсивно обработать детей
+        if (child.type === "FRAME" && child.children) {
             parseNodeOfTree(child, layerName)
         }
 
@@ -704,6 +796,35 @@ function createTemplateGui(instanceNode) {
         return;
     }
     processedComponentIds.add(componentId);
+    
+    // Helper: Recursive check if node contains ANY layout elements
+    function hasLayoutChildren(node) {
+        if (!node.children) return false;
+        return node.children.some(c => {
+            if (c.type === 'FRAME' || c.type === 'INSTANCE' || c.type === 'SECTION' || c.type === 'TEXT') return true;
+            if (c.type === 'GROUP') return hasLayoutChildren(c);
+            return false;
+        });
+    }
+
+    // Helper: Recursive check if node contains ANY visual elements
+    function hasVisualChildren(node) {
+        if (!node.children) return false;
+        return node.children.some(c => {
+             if (!c.visible) return false;
+             if (c.type === 'GROUP') return hasVisualChildren(c);
+             return ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'TEXT'].includes(c.type);
+        });
+    }
+
+    // Determine if this component root is an Empty Layout/Spacer
+    // We check the INSTANCE node itself (because it represents the component usage)
+    const isLayout = hasLayoutChildren(instanceNode);
+    const hasVisuals = hasVisualChildren(instanceNode);
+    const isEmpty = isEmptyContainer(instanceNode);
+    // If it's an Empty Layout OR an Empty Spacer (no visuals), use avoid_node
+    const shouldAvoid = isEmpty && (isLayout || !hasVisuals);
+
     
     // Use mainComponent for naming, instanceNode for dimensions
     var sourceNode = mainComponent || instanceNode;
@@ -757,12 +878,23 @@ function createTemplateGui(instanceNode) {
     nodesContent += '  }\n';
     nodesContent += '  type: TYPE_BOX\n';
     nodesContent += '  blend_mode: BLEND_MODE_ALPHA\n';
-    nodesContent += '  texture: "' + frame_name + '/' + templateName + '"\n';
+    
+    if (shouldAvoid) {
+        nodesContent += '  texture: "' + frame_name + '/avoid_node_empty"\n';
+    } else {
+        nodesContent += '  texture: "' + frame_name + '/' + templateName + '"\n';
+    }
+    
     nodesContent += '  id: "' + templateName + '"\n';
     nodesContent += '  xanchor: XANCHOR_NONE\n';
     nodesContent += '  yanchor: YANCHOR_NONE\n';
     nodesContent += '  pivot: PIVOT_CENTER\n';
-    nodesContent += '  adjust_mode: ADJUST_MODE_FIT\n';
+    
+    if (shouldAvoid) {
+        nodesContent += '  adjust_mode: ADJUST_MODE_STRETCH\n';
+    } else {
+        nodesContent += '  adjust_mode: ADJUST_MODE_FIT\n';
+    }
     nodesContent += '  layer: ""\n';
     nodesContent += '  inherit_alpha: true\n';
     
@@ -789,8 +921,8 @@ function createTemplateGui(instanceNode) {
     nodesContent += '  alpha: 1.0\n';
     nodesContent += '  template_node_child: false\n';
     
-    // Use SIZE_MODE_MANUAL for corner nodes so slice9 works
-    if (isCorner) {
+    // Use SIZE_MODE_MANUAL for corner nodes OR empty layouts so size works
+    if (isCorner || shouldAvoid) {
         nodesContent += '  size_mode: SIZE_MODE_MANUAL\n';
     } else {
         nodesContent += '  size_mode: SIZE_MODE_AUTO\n';
@@ -831,20 +963,69 @@ function parseTemplateNodes(node, parent_name, rootNode) {
     
     for (let child of node.children) {
         if (child.name != "[exclude]") {
-            var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
+            var layerName = child.name.replace(/\[corner\]/g, "");
             
-            // Calculate position relative to parent CENTER (not corner)
-            // child.x/y are relative to parent's top-left corner
-            // We need to convert to center-based coordinates
+            // Skip primitive shapes - they're exported as part of parent FRAME image
+            const primitiveTypes = ['ELLIPSE', 'RECTANGLE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION'];
+            if (primitiveTypes.includes(child.type)) {
+                continue; // Don't create separate node for shapes
+            }
+
+            // Determine Pivot and Anchor Point based on Text Alignment
+            // Default to Center (for Boxes)
+            let hAlign = 'CENTER';
+            let vAlign = 'CENTER';
+            
+            if (child.type === 'TEXT') {
+                hAlign = child.textAlignHorizontal || 'CENTER';
+                vAlign = child.textAlignVertical || 'CENTER';
+                if (hAlign === 'JUSTIFIED') hAlign = 'LEFT'; // Fallback
+            }
+
+            // Calculate Anchor Point (in Parent Local Space) based on alignment
+            let anchorX = child.x + child.width / 2;
+            let anchorY = child.y + child.height / 2;
+            let pivotName = 'PIVOT_CENTER';
+
+            // Horizontal Logic
+            let suffixH = '';
+            if (hAlign === 'LEFT') {
+                anchorX = child.x;
+                suffixH = 'W';
+            } else if (hAlign === 'RIGHT') {
+                anchorX = child.x + child.width;
+                suffixH = 'E';
+            }
+
+            // Vertical Logic
+            let suffixV = '';
+            if (vAlign === 'TOP') {
+                anchorY = child.y;
+                suffixV = 'N';
+            } else if (vAlign === 'BOTTOM') {
+                anchorY = child.y + child.height;
+                suffixV = 'S';
+            }
+
+            // Construct Pivot Name (e.g. PIVOT_NW, PIVOT_N, PIVOT_W, PIVOT_CENTER)
+            if (suffixV === '' && suffixH === '') {
+                pivotName = 'PIVOT_CENTER';
+            } else {
+                pivotName = 'PIVOT_' + suffixV + suffixH;
+            }
+
+            // Correct combinations like PIVOT_N (Top-Center) -> suffixH is empty
+            // PIVOT_W (Center-Left) -> suffixV is empty
+            
+            // Calculate Position relative to Parent CENTER
             var parentCenterX = rootNode.width / 2;
             var parentCenterY = rootNode.height / 2;
-            var childCenterX = child.x + child.width / 2;
-            var childCenterY = child.y + child.height / 2;
             
-            // posX: offset from parent center (positive = right)
-            // posY: offset from parent center (positive = up, so we flip Y)
-            var posX = childCenterX - parentCenterX;
-            var posY = parentCenterY - childCenterY;
+            // posX: offset from parent center
+            // posY: offset from parent center (Y flipped)
+            var posX = anchorX - parentCenterX;
+            var posY = parentCenterY - anchorY;
+            
             
             var nodeContent = 'nodes {\n';
             nodeContent += '  position {\n';
@@ -892,7 +1073,7 @@ function parseTemplateNodes(node, parent_name, rootNode) {
                 nodeContent += '  id: "text"\n';
                 nodeContent += '  xanchor: XANCHOR_NONE\n';
                 nodeContent += '  yanchor: YANCHOR_NONE\n';
-                nodeContent += '  pivot: PIVOT_CENTER\n';
+                nodeContent += '  pivot: ' + pivotName + '\n';
                 nodeContent += '  adjust_mode: ADJUST_MODE_FIT\n';
                 nodeContent += '  line_break: false\n';
                 nodeContent += '  layer: "text"\n';
@@ -960,8 +1141,8 @@ function parseTemplateNodes(node, parent_name, rootNode) {
             nodeContent += '}\n';
             result += nodeContent;
             
-            // Only recurse if [p] tag is present (same logic as main parseNodeOfTree)
-            if (child.name.includes("[p]") && child.children) {
+            // Если это FRAME - рекурсивно обработать детей
+            if (child.type === "FRAME" && child.children) {
                 result += parseTemplateNodes(child, layerName, rootNode);
             }
         }
@@ -1063,8 +1244,6 @@ function createScriptFile(selection) {
          }
          scriptContent += '\n';
     }
-
-    scriptContent += '    -- инциализация анимации\n';
     
     // Generate code to clone instances from templates
     if (instanceDataForClone.length > 0) {
@@ -1181,7 +1360,7 @@ function createScriptFile(selection) {
 
                 for (let child of node.children) {
                     if (child.name != "[exclude]") {
-                        var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
+                        var layerName = child.name.replace(/\[corner\]/g, "");
 
                         // Handle INSTANCE nodes - iterate their children with instanceId prefix
                         if (child.type === "INSTANCE") {
@@ -1225,7 +1404,8 @@ function createScriptFile(selection) {
                         if (child.type === "INSTANCE") {
                             continue;
                         }
-                        if (child.name.includes("[p]")) {
+                        // Если это FRAME - рекурсивно обработать детей
+                        if (child.type === "FRAME" && child.children) {
                             iterateTree(child)
                         }
                     }
@@ -1260,7 +1440,7 @@ function createScriptFile(selection) {
         if (node.type === "FRAME") {
             function iterateTree(node) {
                 for (let child of node.children) {
-                    var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
+                    var layerName = child.name.replace(/\[corner\]/g, "");
 
                     if (child.name.includes("_btn")) {
                         scriptContent += '\n';
@@ -1270,7 +1450,8 @@ function createScriptFile(selection) {
                     }
 
                     if (child.name != "[exclude]") {
-                        if (child.name.includes("[p]")) {
+                        // Если это FRAME - рекурсивно
+                        if (child.type === "FRAME" && child.children) {
                             iterateTree(child)
                         }
                     }
@@ -1350,6 +1531,7 @@ function startExport(selection) {
         emptyContainerIds.clear();
         templateGuiFiles = [];
         processedComponentIds.clear();
+        exportedComponentIds.clear();
         addedHiddenTemplates.clear();
         instanceDataForClone = [];
         layoutContainers.clear();
