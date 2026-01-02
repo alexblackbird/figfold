@@ -30,6 +30,7 @@ var templateGuiFiles = []; // { name: string, content: string }
 var processedComponentIds = new Set(); // Track unique components to avoid duplicate templates
 var addedHiddenTemplates = new Set(); // Track which templates are already added hidden on scene
 var instanceDataForClone = []; // { templateName, instanceId, x, y, textContent } for code generation
+var layoutContainers = new Map(); // Store AutoLayout frame data: { id, mode, margin, padding }
 
 // Check if a node is an empty container (no visible fills AND no visible strokes)
 function isEmptyContainer(node) {
@@ -345,6 +346,21 @@ var offsetX = 0
 var offsetY = 0
 
 function parseNodeOfTree(node, parent_name) {
+    // Collect AutoLayout properties for the container node
+    if (parent_name && (node.layoutMode === "VERTICAL" || node.layoutMode === "HORIZONTAL")) {
+        layoutContainers.set(parent_name, {
+            mode: node.layoutMode.toLowerCase(),
+            isWrap: node.layoutWrap === "WRAP",
+            margin: node.itemSpacing || 0,
+            padding: {
+                top: node.paddingTop || 0,
+                bottom: node.paddingBottom || 0,
+                left: node.paddingLeft || 0,
+                right: node.paddingRight || 0
+            }
+        });
+    }
+
     if (!node.children) {
         return;
     }
@@ -433,6 +449,8 @@ function parseNodeOfTree(node, parent_name) {
                 
                 continue; // Skip regular node creation - will be cloned from code
             }
+
+            
 
             if (child.type === "TEXT") {
                 // Корректировка позиции для разных pivot (LEFT/RIGHT)
@@ -942,7 +960,8 @@ function parseTemplateNodes(node, parent_name, rootNode) {
             nodeContent += '}\n';
             result += nodeContent;
             
-            if (child.children) {
+            // Only recurse if [p] tag is present (same logic as main parseNodeOfTree)
+            if (child.name.includes("[p]") && child.children) {
                 result += parseTemplateNodes(child, layerName, rootNode);
             }
         }
@@ -993,10 +1012,24 @@ function createCollectionContent(selection) {
 
 function createScriptFile(selection) {
 
-    // Druid boilerplate if enabled
     if (useDruid) {
         scriptContent += 'local druid = require("druid.druid")\n';
+        if (layoutContainers.size > 0) {
+            scriptContent += 'local layout = require("druid.extended.layout")\n';
+        }
         scriptContent += '\n';
+        
+        // Generate callback placeholders
+        if (instanceDataForClone.length > 0) {
+             for (let data of instanceDataForClone) {
+                 let instanceId = data.instanceId;
+                 if (instanceId.toLowerCase().includes("button") || instanceId.toLowerCase().includes("btn")) {
+                     scriptContent += 'local function on_' + instanceId + '_click(self)\n';
+                     scriptContent += '    print("' + instanceId + ' clicked!")\n';
+                     scriptContent += 'end\n\n';
+                 }
+             }
+        }
     }
 
     scriptContent += 'function init(self)\n';
@@ -1008,6 +1041,29 @@ function createScriptFile(selection) {
     scriptContent += '    msg.post(".", "acquire_input_focus")\n';
     scriptContent += '    gui.set_render_order(13)\n';
     scriptContent += '\n';
+    
+    // Initialize layouts
+    if (useDruid && layoutContainers.size > 0) {
+         scriptContent += '    -- Initialize layouts\n';
+         for (let [id, data] of layoutContainers) {
+             let mode = data.mode;
+             if (data.isWrap) {
+                 mode += '_wrap';
+             }
+             scriptContent += '    self.layout_' + id + ' = self.druid:new(layout, "' + id + '", "' + mode + '")\n';
+             
+             // Set margin based on orientation
+             if (data.mode === 'vertical') {
+                 scriptContent += '    self.layout_' + id + ':set_margin(0, ' + data.margin + ')\n';
+             } else {
+                 scriptContent += '    self.layout_' + id + ':set_margin(' + data.margin + ', 0)\n';
+             }
+             
+             scriptContent += '    self.layout_' + id + ':set_padding(' + data.padding.left + ', ' + data.padding.top + ', ' + data.padding.right + ', ' + data.padding.bottom + ')\n';
+         }
+         scriptContent += '\n';
+    }
+
     scriptContent += '    -- инциализация анимации\n';
     
     // Generate code to clone instances from templates
@@ -1018,26 +1074,47 @@ function createScriptFile(selection) {
         for (let data of instanceDataForClone) {
             let instanceId = data.instanceId;
             let templateName = data.templateName;
+            let isButton = useDruid && (instanceId.toLowerCase().includes("button") || instanceId.toLowerCase().includes("btn"));
+            
+            scriptContent += '    \n';
             
             // local <instanceId> = gui.clone_tree(gui.get_node("<templateName>/<templateName>"))
             // We clone the root node of the template instance on the scene
             scriptContent += '    local ' + instanceId + ' = gui.clone_tree(gui.get_node("' + templateName + '/' + templateName + '"))\n';
             
-            // gui.set_position(<instanceId>["<templateName>/<templateName>"], vmath.vector3(x, y, 0))
-            scriptContent += '    gui.set_position(' + instanceId + '["' + templateName + '/' + templateName + '"], vmath.vector3(' + data.x + ', ' + data.y + ', 0))\n';
+            // Store instance
+            scriptContent += '    self.instances["' + instanceId + '"] = ' + instanceId + '\n';
             
-            // gui.set_enabled(<instanceId>["<templateName>/<templateName>"], true)
-            scriptContent += '    gui.set_enabled(' + instanceId + '["' + templateName + '/' + templateName + '"], true)\n';
+            // Define root node variable for convenience (templateName/templateName)
+            scriptContent += '    local ' + instanceId + '_root = ' + instanceId + '["' + templateName + '/' + templateName + '"]\n';
+            
+            // gui.set_position(<instanceId>_root, vmath.vector3(x, y, 0)) - only if not in layout
+            if (!(useDruid && data.parentName && layoutContainers.has(data.parentName))) {
+                scriptContent += '    gui.set_position(' + instanceId + '_root, vmath.vector3(' + data.x + ', ' + data.y + ', 0))\n';
+            }
+            
+            // gui.set_enabled(<instanceId>_root, true)
+            scriptContent += '    gui.set_enabled(' + instanceId + '_root, true)\n';
             
             // Parenting
             if (data.parentName) {
-                scriptContent += '    gui.set_parent(' + instanceId + '["' + templateName + '/' + templateName + '"], gui.get_node("' + data.parentName + '"))\n';
+                scriptContent += '    gui.set_parent(' + instanceId + '_root, gui.get_node("' + data.parentName + '"))\n';
+            }
+            
+            // Add to layout if parent is a layout container and Druid is enabled
+            if (useDruid && data.parentName && layoutContainers.has(data.parentName)) {
+                scriptContent += '    self.layout_' + data.parentName + ':add(' + instanceId + '_root)\n';
+            }
+            
+            // Create Druid button if applicable
+            if (isButton) {
+                scriptContent += '    self.druid:new_button(' + instanceId + '_root, self.on_' + instanceId + '_click)\n';
             }
 
             // Override texture if needed
             if (data.hasCustomTexture) {
-                // gui.set_texture(<instanceId>["<templateName>/<templateName>"], "<instanceId>")
-                scriptContent += '    gui.set_texture(' + instanceId + '["' + templateName + '/' + templateName + '"], "' + instanceId + '")\n';
+                // gui.set_texture(<instanceId>_root, "<instanceId>")
+                scriptContent += '    gui.set_texture(' + instanceId + '_root, "' + instanceId + '")\n';
             }
 
             // Set text if needed
@@ -1070,6 +1147,15 @@ function createScriptFile(selection) {
                 }
             }
         }
+        
+        // Refresh layouts after adding all elements
+        if (useDruid && layoutContainers.size > 0) {
+            scriptContent += '\n';
+            for (let [id, data] of layoutContainers) {
+                scriptContent += '    self.layout_' + id + ':refresh_layout()\n';
+            }
+        }
+        
         scriptContent += '\n';
     }
 
@@ -1266,6 +1352,7 @@ function startExport(selection) {
         processedComponentIds.clear();
         addedHiddenTemplates.clear();
         instanceDataForClone = [];
+        layoutContainers.clear();
 
         exportLayersToPNG(selection);
     }
@@ -1300,6 +1387,11 @@ async function handleMessage(msg) {
     } else if (msg.type === 'testApi') {
         // Test DeepSeek API connection
         figma.ui.postMessage({ type: 'apiTestResult', success: true });
+    } else if (msg.type === 'loadTranslationCache') {
+        const cache = await figma.clientStorage.getAsync('translationCache');
+        figma.ui.postMessage({ type: 'translationCacheLoaded', cache: cache || {} });
+    } else if (msg.type === 'saveTranslationCache') {
+        await figma.clientStorage.setAsync('translationCache', msg.cache);
     }
 }
 
