@@ -22,13 +22,28 @@
   .tab-content { display: none; }
   .tab-content.active { display: block; }
   .api-section { background: #f0f8ff; padding: 8px; border-radius: 4px; }
-  #fonts-list { max-height: 120px; overflow-y: auto; }
+  #loading-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(255,255,255,0.9); z-index: 1000;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .spinner {
+    border: 4px solid #f3f3f3; border-top: 4px solid #18A0FB; border-radius: 50%;
+    width: 30px; height: 30px; animation: spin 1s linear infinite; margin-bottom: 10px;
+  }
+  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  .status-text { color: #333; font-weight: 500; font-size: 12px; }
 </style>
+
+
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <div class="status-text" id="status-text">Processing...</div>
+</div>
 
 <div class="tabs">
   <button class="tab active" data-tab="settings">Settings</button>
   <button class="tab" data-tab="json">JSON</button>
-  <button class="tab" data-tab="api">API</button>
 </div>
 
 <div id="settings" class="tab-content active">
@@ -36,9 +51,17 @@
     <div class="section-title">Project</div>
     <div class="row"><label>Width</label><input type="number" id="width" value="1080"></div>
     <div class="row"><label>Height</label><input type="number" id="height" value="1920"></div>
-    <div class="row"><label>Scale</label><input type="number" id="scale" value="1" step="0.1"></div>
     <div class="row"><label>Max Font Scale</label><input type="number" id="maxFontScale" value="60"></div>
     <div class="row"><label>Use Background</label><input type="checkbox" id="useBackground" checked></div>
+    <div class="row"><label>Druid</label><input type="checkbox" id="useDruid" checked></div>
+  </div>
+  <div class="section" style="background: #f0f8ff; padding: 8px; border-radius: 4px;">
+    <div class="section-title">API & Translation</div>
+    <div class="row"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-..."></div>
+    <div class="row"><label>Languages</label><input type="text" id="languages" value="en,ru,de,fr,es,pt,ko,ja"></div>
+    <div class="row"><label>Sheet URL</label><input type="text" id="googleSheetUrl" placeholder="https://webapp-url..."></div>
+    <div class="row"><label>Auto-translate</label><input type="checkbox" id="autoTranslate"></div>
+    <button class="btn btn-secondary" id="testApi" style="margin-top:6px;width:100%">Test DeepSeek Connection</button>
   </div>
   <div class="section">
     <div class="section-title">Fonts <button class="btn btn-small btn-secondary" id="addFont">+ Add</button></div>
@@ -58,22 +81,7 @@
   </div>
 </div>
 
-<div id="api" class="tab-content">
-  <div class="section api-section">
-    <div class="section-title">DeepSeek API</div>
-    <div class="row"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-..."></div>
-    <div class="row"><label>Languages</label><input type="text" id="languages" value="en,ru,de,fr,es,pt,ko,ja"></div>
-    <button class="btn btn-secondary" id="testApi" style="margin-top:6px">Test Connection</button>
-  </div>
-  <div class="section" style="margin-top:12px">
-    <div class="section-title">Translate Texts</div>
-    <textarea id="textsToTranslate" class="json-area" placeholder="Enter texts to translate, one per line..."></textarea>
-    <button class="btn btn-primary" id="translateBtn" style="width:100%;margin-top:6px">Translate</button>
-    <div id="translationStatus" style="margin-top:6px;font-size:10px;color:#666"></div>
-    <textarea id="translationResult" class="json-area" style="height:120px;margin-top:6px;display:none" readonly></textarea>
-    <button class="btn btn-secondary" id="copyTranslations" style="margin-top:6px;display:none">Copy CSV</button>
-  </div>
-</div>
+
 
 <script>
 // Tab switching
@@ -88,12 +96,13 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 // Settings object
 let settings = {
-  width: 1080, height: 1920, scale: 1, maxFontScale: 60, useBackground: true,
+  width: 1080, height: 1920, maxFontScale: 60, useBackground: true, useDruid: true,
   fonts: [
     { name: "font_bold", fontPath: "/assets/fonts/font_bold.font" },
     { name: "font_regular", fontPath: "/assets/fonts/font_regular.font" }
   ],
-  apiKey: "", languages: "en,ru,de,fr,es,pt,ko,ja"
+  apiKey: "", languages: "en,ru,de,fr,es,pt,ko,ja",
+  googleSheetUrl: "", autoTranslate: false
 };
 
 function renderFonts() {
@@ -101,11 +110,11 @@ function renderFonts() {
   list.innerHTML = settings.fonts.map((f, i) => `
     <div class="font-item">
       <div class="font-row">
-        <input type="text" value="${f.name}" placeholder="name" onchange="settings.fonts[${i}].name=this.value;updateJson()">
-        <button class="btn btn-small btn-danger" onclick="settings.fonts.splice(${i},1);renderFonts();updateJson()">×</button>
+        <input type="text" value="${f.name}" placeholder="name" onchange="settings.fonts[${i}].name=this.value;updateJson();saveSettings()">
+        <button class="btn btn-small btn-danger" onclick="settings.fonts.splice(${i},1);renderFonts();updateJson();saveSettings()">×</button>
       </div>
       <div class="font-row">
-        <input type="text" value="${f.fontPath}" placeholder="path" onchange="settings.fonts[${i}].fontPath=this.value;updateJson()">
+        <input type="text" value="${f.fontPath}" placeholder="path" onchange="settings.fonts[${i}].fontPath=this.value;updateJson();saveSettings()">
       </div>
     </div>
   `).join('');
@@ -114,22 +123,26 @@ function renderFonts() {
 function updateJson() {
   settings.width = parseInt(document.getElementById('width').value);
   settings.height = parseInt(document.getElementById('height').value);
-  settings.scale = parseFloat(document.getElementById('scale').value);
   settings.maxFontScale = parseInt(document.getElementById('maxFontScale').value);
   settings.useBackground = document.getElementById('useBackground').checked;
+  settings.useDruid = document.getElementById('useDruid').checked;
   settings.apiKey = document.getElementById('apiKey').value;
   settings.languages = document.getElementById('languages').value;
+  settings.googleSheetUrl = document.getElementById('googleSheetUrl').value;
+  settings.autoTranslate = document.getElementById('autoTranslate').checked;
   document.getElementById('jsonArea').value = JSON.stringify(settings, null, 2);
 }
 
 function applySettings() {
   document.getElementById('width').value = settings.width;
   document.getElementById('height').value = settings.height;
-  document.getElementById('scale').value = settings.scale;
   document.getElementById('maxFontScale').value = settings.maxFontScale;
   document.getElementById('useBackground').checked = settings.useBackground;
+  document.getElementById('useDruid').checked = settings.useDruid !== false;
   document.getElementById('apiKey').value = settings.apiKey || '';
   document.getElementById('languages').value = settings.languages || 'en,ru,de,fr,es,pt,ko,ja';
+  document.getElementById('googleSheetUrl').value = settings.googleSheetUrl || '';
+  document.getElementById('autoTranslate').checked = settings.autoTranslate === true;
   renderFonts();
   updateJson();
 }
@@ -138,11 +151,49 @@ document.getElementById('addFont').onclick = () => {
   settings.fonts.push({ name: "new_font", fontPath: "/assets/fonts/new_font.font" });
   renderFonts();
   updateJson();
+  saveSettings();
 };
 
+function saveSettings() {
+  parent.postMessage({ pluginMessage: { type: 'saveSettings', settings } }, '*');
+}
+
 document.getElementById('copyJson').onclick = () => {
-  navigator.clipboard.writeText(document.getElementById('jsonArea').value);
+  const text = document.getElementById('jsonArea').value;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => {
+      alert('JSON copied to clipboard');
+    }).catch(err => {
+      fallbackCopyText(text);
+    });
+  } else {
+    fallbackCopyText(text);
+  }
 };
+
+function fallbackCopyText(text) {
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  
+  // Avoid scrolling to bottom
+  textArea.style.top = "0";
+  textArea.style.left = "0";
+  textArea.style.position = "fixed";
+
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+
+  try {
+    const successful = document.execCommand('copy');
+    if(successful) alert('JSON copied to clipboard');
+    else alert('Unable to copy JSON');
+  } catch (err) {
+    alert('Unable to copy JSON');
+  }
+
+  document.body.removeChild(textArea);
+}
 
 document.getElementById('applyJson').onclick = () => {
   try {
@@ -152,11 +203,18 @@ document.getElementById('applyJson').onclick = () => {
   } catch(e) { alert('Invalid JSON'); }
 };
 
-document.querySelectorAll('#settings input').forEach(el => el.onchange = updateJson);
+document.querySelectorAll('#settings input').forEach(el => el.onchange = () => { updateJson(); saveSettings(); });
 
 document.getElementById('export').onclick = () => {
   updateJson();
-  parent.postMessage({ pluginMessage: { type: 'export', settings } }, '*');
+  document.getElementById('loading-overlay').style.display = 'flex';
+  document.getElementById('status-text').textContent = 'Generating assets...';
+  // Small delay to allow UI to render spinner
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      parent.postMessage({ pluginMessage: { type: 'export', settings } }, '*');
+    });
+  });
 };
 
 document.getElementById('testApi').onclick = async () => {
@@ -165,79 +223,7 @@ document.getElementById('testApi').onclick = async () => {
   parent.postMessage({ pluginMessage: { type: 'testApi', apiKey: key } }, '*');
 };
 
-// Translation function using DeepSeek API
-document.getElementById('translateBtn').onclick = async () => {
-  const key = document.getElementById('apiKey').value;
-  const langs = document.getElementById('languages').value.split(',').map(l => l.trim());
-  const texts = document.getElementById('textsToTranslate').value.split('\n').filter(t => t.trim());
-  
-  if (!key) { alert('Enter API key in API tab'); return; }
-  if (!texts.length) { alert('Enter texts to translate'); return; }
-  
-  const status = document.getElementById('translationStatus');
-  const result = document.getElementById('translationResult');
-  const copyBtn = document.getElementById('copyTranslations');
-  
-  status.textContent = 'Translating...';
-  result.style.display = 'none';
-  copyBtn.style.display = 'none';
-  
-  try {
-    const translations = {};
-    for (const text of texts) {
-      translations[text] = {};
-      status.textContent = `Translating: "${text.substring(0, 20)}..."`;
-      
-      const response = await fetch('https://api.deepseek.com/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${key}`
-        },
-        body: JSON.stringify({
-          model: 'deepseek-chat',
-          messages: [{
-            role: 'user',
-            content: `Translate this text to these languages: ${langs.join(', ')}. 
-Return ONLY a JSON object with language codes as keys and translations as values. No explanation.
-Text: "${text}"`
-          }],
-          temperature: 0.3
-        })
-      });
-      
-      if (!response.ok) throw new Error('API Error: ' + response.status);
-      
-      const data = await response.json();
-      const content = data.choices[0].message.content;
-      
-      // Parse JSON from response
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        translations[text] = JSON.parse(jsonMatch[0]);
-      }
-    }
-    
-    // Format as CSV
-    let csv = 'key,' + langs.join(',') + '\n';
-    for (const [text, trans] of Object.entries(translations)) {
-      const row = [text, ...langs.map(l => trans[l] || '')].map(v => `"${v.replace(/"/g, '""')}"`);
-      csv += row.join(',') + '\n';
-    }
-    
-    result.value = csv;
-    result.style.display = 'block';
-    copyBtn.style.display = 'inline-block';
-    status.textContent = `Done! ${texts.length} texts translated to ${langs.length} languages`;
-  } catch (e) {
-    status.textContent = 'Error: ' + e.message;
-  }
-};
 
-document.getElementById('copyTranslations').onclick = () => {
-  navigator.clipboard.writeText(document.getElementById('translationResult').value);
-  document.getElementById('translationStatus').textContent = 'Copied to clipboard!';
-};
 
 // Load saved settings
 parent.postMessage({ pluginMessage: { type: 'loadSettings' } }, '*');
@@ -263,9 +249,7 @@ applySettings();
 </script>
 
 <script>
-  document.getElementById('export').onclick = () => {
-    parent.postMessage({ pluginMessage: { type: 'export' } }, '*');
-  }
+
 
   function downloadImages(images, atlasContent, guiContent, scriptContent, collectionContent) {
     if (Array.isArray(images)) {
@@ -299,19 +283,22 @@ applySettings();
     }
   }
 
-  window.addEventListener('message', event => {
+  window.addEventListener('message', async event => {
     const pluginMessage = event.data.pluginMessage;
+    if (!pluginMessage || pluginMessage.type !== 'export') return;
+
+    try {
+      document.getElementById('status-text').textContent = 'Processing files...';
 
     let fileNames = [];
     let reg = /-\d+$/;
     var zip = new JSZip();
-    event.data.pluginMessage.all_atlas_images.forEach(item => {
+
+    // Add images
+    pluginMessage.all_atlas_images.forEach(item => {
       console.log(item.name);
       let fileName = item.name;
       let data = item.value;
-
-      // Обработка повторяющихся имен
-      removal(fileName);
 
       function removal(name) {
         if (fileNames.indexOf(name) >= 0) {
@@ -324,35 +311,140 @@ applySettings();
           removal(fileName);
         }
       }
+      removal(fileName);
       fileNames.push(fileName);
-
       zip.folder('images').file(fileName, data);
     });
 
-    // Добавляем файл с atlasContent в архив
-    zip.file(event.data.pluginMessage.zipName +'.atlas', pluginMessage.atlasContent);
+    // Add atlas file
+    zip.file(pluginMessage.zipName + '.atlas', pluginMessage.atlasContent);
 
-    // Добавляем файл с guiContent в архив
-    zip.file(event.data.pluginMessage.zipName +'.gui', pluginMessage.guiContent);
+    // Add gui file
+    zip.file(pluginMessage.zipName + '.gui', pluginMessage.guiContent);
 
-    // Добавляем файл с scriptContent в архив
-    zip.file(event.data.pluginMessage.zipName +'.gui_script', pluginMessage.scriptContent);
+    // Handle auto-translation
+    let finalScriptContent = pluginMessage.scriptContent;
+    let translationsCSV = '';
 
-    // Добавляем файл с collectionContent в архив
-    zip.file(event.data.pluginMessage.zipName +'.collection', pluginMessage.collectionContent);
+    if (pluginMessage.autoTranslate && pluginMessage.apiKey && pluginMessage.textsForTranslation.length > 0) {
+      const langs = pluginMessage.languages.split(',').map(l => l.trim());
+      const texts = pluginMessage.textsForTranslation;
+      
+      // Build CSV header
+      translationsCSV = 'key,' + langs.join(',') + '\n';
+      
+      let translationsData = [];
 
-    zip.generateAsync({
-      type: "blob"
-    }).then((content) => {
+      try {
+        const textsMap = {};
+        texts.forEach(item => {
+          textsMap[item.key] = item.text;
+        });
+
+        document.getElementById('status-text').textContent = 'Translating all texts...';
+
+        const response = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${pluginMessage.apiKey}`
+            },
+            body: JSON.stringify({
+              model: 'deepseek-chat',
+              messages: [{
+                role: 'user',
+                content: `Translate the values of the following JSON object into these languages: ${langs.join(', ')}. 
+Return ONLY a valid JSON object where keys match the input keys, and values are objects containing the translations keyed by language code.
+Example Output Format: { "KEY_1": { "en": "Value", "ru": "Значение" } }
+Do not provide any explanations, markdown formatting, or code blocks. Just the raw JSON string.
+Input JSON: ${JSON.stringify(textsMap)}`
+              }],
+              temperature: 0.3
+            })
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            const content = data.choices[0].message.content;
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            
+            if (jsonMatch) {
+              const allTranslations = JSON.parse(jsonMatch[0]);
+              
+              // Process collected translations
+              texts.forEach(item => {
+                 const itemTrans = allTranslations[item.key] || {};
+                 
+                 // Add to CSV
+                 const row = [item.key, ...langs.map(l => (itemTrans[l] || '').replace(/"/g, '""'))].map(v => `"${v}"`);
+                 translationsCSV += row.join(',') + '\n';
+                 
+                 // Add to object for Sheets
+                 const transObj = { key: item.key, original: item.text };
+                 langs.forEach(l => transObj[l] = itemTrans[l] || '');
+                 translationsData.push(transObj);
+              });
+            }
+          } else {
+             const errText = await response.text();
+             throw new Error('API Error: ' + response.status + ' ' + errText);
+          }
+
+      } catch (e) {
+        console.error('Translation error:', e);
+        alert('Translation error: ' + e.message);
+      }
+
+      // Handle Google Sheets Integration
+      var sheetUploadSuccess = false;
+      if (pluginMessage.googleSheetUrl && translationsData.length > 0) {
+        try {
+          await fetch(pluginMessage.googleSheetUrl, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ translations: translationsData, languages: langs })
+          });
+          sheetUploadSuccess = true;
+        } catch (e) {
+          console.error('Google Sheet Upload Error:', e);
+          alert('Failed to send translations to Google Sheet. CSV will be included in archive.');
+        }
+      }
+
+      // Add translations CSV to archive ONLY if Google Sheet not configured or upload failed
+      if (translationsCSV && !sheetUploadSuccess) {
+        zip.file('translations.csv', translationsCSV);
+        // Also embed in script as fallback
+        finalScriptContent += '\n\n--[[\nTRANSLATIONS CSV:\n' + translationsCSV + ']]\n';
+      }
+    }
+
+    // Add script file
+    zip.file(pluginMessage.zipName + '.gui_script', finalScriptContent);
+
+    // Add collection file
+    zip.file(pluginMessage.zipName + '.collection', pluginMessage.collectionContent);
+
+    // Generate and download zip
+    document.getElementById('status-text').textContent = 'Creating ZIP...';
+    zip.generateAsync({ type: "blob" }).then((content) => {
       let url = window.URL.createObjectURL(content);
-      downloadFile(url, event.data.pluginMessage.zipName + ".zip");
-    });
-
-    function downloadFile(url, name) {
       let a = document.createElement("a");
       a.href = url;
-      a.download = name;
+      a.download = pluginMessage.zipName + ".zip";
       a.click();
+      
+      // Hide loader after a short delay
+      setTimeout(() => {
+        document.getElementById('loading-overlay').style.display = 'none';
+      }, 1000);
+    });
+
+    } catch (e) {
+      console.error(e);
+      alert("Error: " + e.message);
+      document.getElementById('loading-overlay').style.display = 'none';
     }
   });
 </script>

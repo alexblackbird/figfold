@@ -11,7 +11,10 @@
   "ui": "ui.html",
   "networkAccess": {
     "allowedDomains": [
-      "https://api.deepseek.com"
+      "https://api.deepseek.com",
+      "https://script.google.com",
+      "https://docs.google.com",
+      "https://script.googleusercontent.com"
     ]
   }
 }

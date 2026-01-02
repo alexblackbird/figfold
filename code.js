@@ -12,6 +12,9 @@ var is_use_background_node = true;
 var max_font_scale = 60;
 var apiKey = "";
 var languages = "en,ru,de,fr,es,pt,ko,ja";
+var useDruid = true;
+var googleSheetUrl = "";
+var autoTranslate = false;
 
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) { function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); } return new (P || (P = Promise))(function (resolve, reject) { function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } } function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } } function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); } step((generator = generator.apply(thisArg, _arguments || [])).next()); }); };
 
@@ -21,7 +24,39 @@ var atlasContent = '';
 var guiContent = '';
 var scriptContent = '';
 var collectionContent = '';
+var textsForTranslation = [];
+var emptyContainerIds = new Set();
 
+// Check if a node is an empty container (no visible fills AND no visible strokes)
+function isEmptyContainer(node) {
+    // Check for visible strokes
+    var hasVisibleStroke = node.strokes && node.strokes.length > 0 && 
+        node.strokes.some(stroke => stroke.visible !== false);
+    if (hasVisibleStroke) return false;
+    
+    // Check for visible fills
+    if (!node.fills || node.fills.length === 0) return true;
+    return node.fills.every(fill => 
+        fill.visible === false || 
+        (fill.type === 'SOLID' && (fill.opacity === 0 || (fill.color && fill.color.a === 0)))
+    );
+}
+
+// 1x1 transparent PNG as raw bytes (validated, atob not available in Figma sandbox)
+function getEmptyPlaceholderImage() {
+    // Valid 1x1 transparent PNG
+    return new Uint8Array([
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk length + type
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // width=1, height=1
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, // bit depth, color type, compression, filter, interlace + CRC
+        0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, // IDAT chunk length + type
+        0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, // compressed data + CRC
+        0x0D, 0x0A, 0x2D, 0xB4,
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND chunk
+        0xAE, 0x42, 0x60, 0x82  // IEND CRC
+    ]);
+}
 function updateExportSettings() {
     return {
         format: "PNG",
@@ -55,15 +90,21 @@ async function exportLayer(node) {
                     child.resize(newSize, newSize);
                 }
 
-                const value = await child.exportAsync(exportSettings);
+                // Check if this is an empty [p] container (only for parent nodes)
+                if (child.name.includes("[p]") && isEmptyContainer(child)) {
+                    // Track empty container, don't export full image
+                    emptyContainerIds.add(child.id);
+                } else {
+                    const value = await child.exportAsync(exportSettings);
 
-                // Удаление "[corner]" из имени файла
-                const fileName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "") + ".png";
+                    // Удаление "[corner]" из имени файла
+                    const fileName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "") + ".png";
 
-                all_atlas_images.push({
-                    name: fileName,
-                    value: value,
-                });
+                    all_atlas_images.push({
+                        name: fileName,
+                        value: value,
+                    });
+                }
 
                 if (child.name.includes("[corner]")) {
                     child.resize(originalSizes[child.id].width, originalSizes[child.id].height);
@@ -109,6 +150,14 @@ async function exportLayersToPNG(selection) {
 // Создаем .atlas файл и заполняем его содержимым
 // нам нужен архив во всеми созданными файлами
 function createAtlasFile(selection) {
+    // Add placeholder image for empty containers if needed
+    if (emptyContainerIds.size > 0) {
+        all_atlas_images.push({
+            name: 'avoid_node_empty.png',
+            value: getEmptyPlaceholderImage(),
+        });
+    }
+
     for (const data of all_atlas_images) {
         var imagePath = '/assets/' + frame_name + '/images/' + data.name;
         atlasContent += 'images {\n';
@@ -143,10 +192,6 @@ function createGUIFile(selection) {
     guiContent += 'textures {\n';
     guiContent += '  name: "' + frame_name + '"\n';
     guiContent += '  texture: "/assets/' + frame_name + '/' + frame_name + '.atlas"\n';
-    guiContent += '}\n';
-    guiContent += 'textures {\n';
-    guiContent += '  name: "ui"\n';
-    guiContent += '  texture: "/assets/ui.atlas"\n';
     guiContent += '}\n';
 
 
@@ -228,17 +273,12 @@ function parseNodeOfTree(node, parent_name) {
             }
 
             if (child.type === "TEXT") {
-                // если есть отличия в пивоте то нужно изменять положение текста
+                // Корректировка позиции для разных pivot (LEFT/RIGHT)
                 let horizontalAlignment = child.textAlignHorizontal;
-                var textSize = child.fontSize;
-                var text_scale = textSize / max_font_scale;
-                var textWidth = child.width / text_scale;
-                var textHeight = child.height / text_scale;
-
                 if (horizontalAlignment === "LEFT") {
-                    layerPosition.x -= textWidth / 4
+                    layerPosition.x -= child.width / 2;
                 } else if (horizontalAlignment === "RIGHT") {
-                    layerPosition.x += textWidth / 4
+                    layerPosition.x += child.width / 2;
                 }
             }
 
@@ -343,7 +383,9 @@ function parseNodeOfTree(node, parent_name) {
             guiContent += 'layer: "text"\n';
             guiContent += 'inherit_alpha: true\n';
             guiContent += 'alpha: 1.0\n';
-            guiContent += 'outline_alpha: 1.0\n';
+            // Check if text has visible strokes
+            var hasStroke = child.strokes && child.strokes.length > 0 && child.strokes.some(s => s.visible !== false);
+            guiContent += 'outline_alpha: ' + (hasStroke ? '1.0' : '0.0') + '\n';
             guiContent += 'template_node_child: false\n';
             guiContent += 'text_leading: 1.1\n';
             guiContent += 'text_tracking: 0.0\n';
@@ -358,17 +400,20 @@ function parseNodeOfTree(node, parent_name) {
             guiContent += '    z: 1.0\n';
             guiContent += '     w: 1.0\n';
             guiContent += '  }\n';
-            if (child.name.includes("[corner]")) {
 
-                let size_width = child.width
-                let size_height = child.height
-                // если у объекта есть тень
-                // TODO сделать поддержку тени со смещением
+            // Determine if this is an empty container
+            var isEmptyNode = emptyContainerIds.has(child.id);
+
+            // Size block - always set manual size for empty containers and [corner] nodes
+            if (child.name.includes("[corner]") || isEmptyNode) {
+                let size_width = child.width;
+                let size_height = child.height;
+                // Check for drop shadow effects
                 if (child.effects && child.effects.length > 0) {
                     for (let effect of child.effects) {
                         if (effect.type === "DROP_SHADOW") {
-                            size_width += effect.radius * 2
-                            size_height += effect.radius * 2
+                            size_width += effect.radius * 2;
+                            size_height += effect.radius * 2;
                         }
                     }
                 }
@@ -395,7 +440,12 @@ function parseNodeOfTree(node, parent_name) {
             guiContent += '  }\n';
             guiContent += '  type: TYPE_BOX\n';
             guiContent += '  blend_mode: BLEND_MODE_ALPHA\n';
-            guiContent += '  texture: "' + frame_name + '/' + layerName + '"\n';
+            // Use placeholder texture for empty containers
+            if (isEmptyNode) {
+                guiContent += '  texture: "' + frame_name + '/avoid_node_empty"\n';
+            } else {
+                guiContent += '  texture: "' + frame_name + '/' + layerName + '"\n';
+            }
             guiContent += '  id: "' + layerName + '"\n';
             guiContent += '  xanchor: XANCHOR_NONE\n';
             guiContent += ' yanchor: YANCHOR_NONE\n';
@@ -438,7 +488,7 @@ function parseNodeOfTree(node, parent_name) {
             guiContent += '  alpha: 1.0\n';
             guiContent += '  template_node_child: false\n';
 
-            if (child.name.includes("[corner]")) {
+            if (child.name.includes("[corner]") || isEmptyNode) {
                 guiContent += '  size_mode: SIZE_MODE_MANUAL\n';
             } else {
                 guiContent += '  size_mode: SIZE_MODE_AUTO\n';
@@ -503,7 +553,16 @@ function createCollectionContent(selection) {
 
 function createScriptFile(selection) {
 
+    // Druid boilerplate if enabled
+    if (useDruid) {
+        scriptContent += 'local druid = require("druid.druid")\n';
+        scriptContent += '\n';
+    }
+
     scriptContent += 'function init(self)\n';
+    if (useDruid) {
+        scriptContent += '    self.druid = druid.new(self)\n';
+    }
     scriptContent += '    self.MONARCH_ID = "' + frame_name + '"\n';
     scriptContent += '\n';
     scriptContent += '    msg.post(".", "acquire_input_focus")\n';
@@ -514,6 +573,9 @@ function createScriptFile(selection) {
     scriptContent += 'end\n';
     scriptContent += '\n';
     scriptContent += 'function on_message(self, message_id, message, sender)\n';
+    if (useDruid) {
+        scriptContent += '    self.druid:on_message(message_id, message, sender)\n';
+    }
     scriptContent += '    -- модуль для работы всех поапов c монархом\n';
     scriptContent += '    popup.on_message_monarch(self, message_id, message, sender)\n';
     scriptContent += '    if message_id == hash("transition_show_in") then\n';
@@ -537,9 +599,21 @@ function createScriptFile(selection) {
                             var withTextContent = textContent.replace(/\n/g, "\\n");
 
                             if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
-                                scriptContent += '        lang.set("' + layerName + '", "' + frame_name.toUpperCase() + '_' + layerName.toUpperCase() + '")\n';
+                                var langKey = frame_name.toUpperCase() + '_' + layerName.toUpperCase();
+                                scriptContent += '        lang.set("' + layerName + '", "' + langKey + '")\n';
+                                // Collect for translation
+                                var exists = false;
+                                for(var t = 0; t < textsForTranslation.length; t++) {
+                                    if(textsForTranslation[t].key === langKey) {
+                                        exists = true;
+                                        break;
+                                    }
+                                }
+                                if (!exists) {
+                                    textsForTranslation.push({ key: langKey, text: cleanTextContent });
+                                }
                             } else {
-                                scriptContent += '        gui.set_text(gui.get_node("' + layerName + '"), ' + withTextContent + ')\n';
+                                scriptContent += '        gui.set_text(gui.get_node("' + layerName + '"), "' + withTextContent + '")\n';
                             }
                         } else {
                             // scriptContent += '        ' + layerName + '\n';
@@ -562,87 +636,23 @@ function createScriptFile(selection) {
         }
     }
 
-    scriptContent += '        --[[\n';
 
-    for (const node of selection) {
-        if (node.type === "FRAME") {
-
-            function iterateTree(node) {
-                if (!node.children) {
-                    return;
-                }
-
-                for (let child of node.children) {
-                    if (child.name != "[exclude]") {
-                        var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
-
-                        if (child.type == "TEXT") {
-                            var textContent = child.characters;
-                            var cleanTextContent = textContent.replace(/\r/g, "");
-                            var withTextContent = textContent.replace(/\n/g, "\\n");
-
-                            if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
-                                scriptContent += '        Переведи этот текст "' + withTextContent + '" на en ru de	fr	it	es	pt	ko	ja	ar	tr в контексте в формате csv\n';
-                            }
-                        }
-                    }
-                }
-
-                for (let child of node.children) {
-                    if (child.name != "[exclude]") {
-                        if (child.name.includes("[p]")) {
-                            iterateTree(child)
-                        }
-                    }
-                }
-            }
-
-            iterateTree(node);
-        }
-    }
-
-    for (const node of selection) {
-        if (node.type === "FRAME") {
-
-            function iterateTree(node) {
-                if (!node.children) {
-                    return;
-                }
-
-                for (let child of node.children) {
-                    if (child.name != "[exclude]") {
-                        var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
-
-                        if (child.type == "TEXT") {
-                            var textContent = child.characters;
-                            var cleanTextContent = textContent.replace(/\r/g, "");
-                            var withTextContent = textContent.replace(/\n/g, "\\n");
-
-                            if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
-                                scriptContent += '        ' + frame_name.toUpperCase() + '_' + layerName.toUpperCase() + '\n';
-                            }
-                        }
-                    }
-                }
-
-                for (let child of node.children) {
-                    if (child.name != "[exclude]") {
-                        if (child.name.includes("[p]")) {
-                            iterateTree(child)
-                        }
-                    }
-                }
-            }
-
-            iterateTree(node);
-        }
-    }
-
-    scriptContent += '        ]]\n';
 
     scriptContent += '    end\n';
     scriptContent += 'end\n';
     scriptContent += '\n';
+
+    // Druid final function
+    if (useDruid) {
+        scriptContent += 'function final(self)\n';
+        scriptContent += '    self.druid:final()\n';
+        scriptContent += 'end\n';
+        scriptContent += '\n';
+        scriptContent += 'function update(self, dt)\n';
+        scriptContent += '    self.druid:update(dt)\n';
+        scriptContent += 'end\n';
+        scriptContent += '\n';
+    }
     scriptContent += 'function on_input(self, action_id, action)\n';
     scriptContent += '    if action_id == hash("touch") then\n';
 
@@ -672,8 +682,10 @@ function createScriptFile(selection) {
     }
 
     scriptContent += '\n';
-    scriptContent += '        return true\n';
     scriptContent += '    end\n';
+    if (useDruid) {
+        scriptContent += '    return self.druid:on_input(action_id, action)\n';
+    }
     scriptContent += 'end\n';
 
     setTimeout(() => {
@@ -689,7 +701,12 @@ function SAVE_ALL() {
         guiContent: guiContent,
         scriptContent: scriptContent,
         collectionContent: collectionContent,
-        zipName: frame_name
+        zipName: frame_name,
+        textsForTranslation: textsForTranslation,
+        autoTranslate: autoTranslate,
+        apiKey: apiKey,
+        languages: languages,
+        googleSheetUrl: googleSheetUrl
     });
 }
 
@@ -728,6 +745,8 @@ function startExport(selection) {
         guiContent = '';
         scriptContent = '';
         collectionContent = '';
+        textsForTranslation = [];
+        emptyContainerIds.clear();
 
         exportLayersToPNG(selection);
     }
@@ -735,13 +754,15 @@ function startExport(selection) {
 
 function applySettings(s) {
     if (!s) return;
-    SCALE = s.scale || 1;
     target_project = { width: s.width || 1080, height: s.height || 1920 };
     target_project_fonts = s.fonts || target_project_fonts;
     is_use_background_node = s.useBackground !== false;
     max_font_scale = s.maxFontScale || 60;
     apiKey = s.apiKey || "";
     languages = s.languages || "en,ru,de,fr,es,pt,ko,ja";
+    useDruid = s.useDruid !== false;
+    googleSheetUrl = s.googleSheetUrl || "";
+    autoTranslate = s.autoTranslate === true;
     exportSettings = updateExportSettings();
 }
 
@@ -765,6 +786,6 @@ async function handleMessage(msg) {
 
 if (figma.editorType === 'figma') {
     figma.showUI(__html__);
-    figma.ui.resize(320, 520);
+    figma.ui.resize(320, 570);
     figma.ui.onmessage = msg => handleMessage(msg);
 }
