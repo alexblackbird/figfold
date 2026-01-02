@@ -2,7 +2,13 @@
   * { box-sizing: border-box; font-family: Inter, sans-serif; font-size: 11px; }
   body { margin: 8px; }
   .section { margin-bottom: 12px; }
-  .section-title { font-weight: 600; margin-bottom: 6px; color: #333; }
+  .section-title { font-weight: 600; margin-bottom: 6px; color: #333; cursor: pointer; display: flex; align-items: center; justify-content: space-between; user-select: none; }
+  .section-title:hover { color: #18A0FB; }
+  .section-title .toggle-icon { transition: transform 0.2s; font-size: 10px; margin-left: 6px; }
+  .section-title.collapsed .toggle-icon { transform: rotate(-90deg); }
+  .section-title-right { display: flex; align-items: center; gap: 8px; }
+  .section-content { overflow: hidden; transition: max-height 0.3s ease-out; }
+  .section-content.collapsed { max-height: 0 !important; }
   .row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
   .row label { width: 120px; color: #666; }
   .row input, .row select { flex: 1; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; }
@@ -48,24 +54,30 @@
 
 <div id="settings" class="tab-content active">
   <div class="section">
-    <div class="section-title">Project</div>
-    <div class="row"><label>Width</label><input type="number" id="width" value="1080"></div>
-    <div class="row"><label>Height</label><input type="number" id="height" value="1920"></div>
-    <div class="row"><label>Max Font Scale</label><input type="number" id="maxFontScale" value="60"></div>
-    <div class="row"><label>Use Background</label><input type="checkbox" id="useBackground" checked></div>
-    <div class="row"><label>Druid</label><input type="checkbox" id="useDruid" checked></div>
-  </div>
-  <div class="section" style="background: #f0f8ff; padding: 8px; border-radius: 4px;">
-    <div class="section-title">API & Translation</div>
-    <div class="row"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-..."></div>
-    <div class="row"><label>Languages</label><input type="text" id="languages" value="en,ru,de,fr,es,pt,ko,ja"></div>
-    <div class="row"><label>Sheet URL</label><input type="text" id="googleSheetUrl" placeholder="https://webapp-url..."></div>
-    <div class="row"><label>Auto-translate</label><input type="checkbox" id="autoTranslate"></div>
-    <button class="btn btn-secondary" id="testApi" style="margin-top:6px;width:100%">Test DeepSeek Connection</button>
+    <div class="section-title" onclick="toggleSection(this)"><span>Project</span><span class="toggle-icon">▼</span></div>
+    <div class="section-content">
+      <div class="row"><label>Width</label><input type="number" id="width" value="1080"></div>
+      <div class="row"><label>Height</label><input type="number" id="height" value="1920"></div>
+      <div class="row"><label>Max Font Scale</label><input type="number" id="maxFontScale" value="60"></div>
+      <div class="row"><label>Use Background</label><input type="checkbox" id="useBackground" checked></div>
+      <div class="row"><label>Druid</label><input type="checkbox" id="useDruid" checked></div>
+    </div>
   </div>
   <div class="section">
-    <div class="section-title">Fonts <button class="btn btn-small btn-secondary" id="addFont">+ Add</button></div>
-    <div id="fonts-list"></div>
+    <div class="section-title" onclick="toggleSection(this)"><span>API & Translation</span><span class="toggle-icon">▼</span></div>
+    <div class="section-content">
+      <div class="row"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-..."></div>
+      <div class="row"><label>Languages</label><input type="text" id="languages" value="en,ru,de,fr,es,pt,ko,ja"></div>
+      <div class="row"><label>Sheet URL</label><input type="text" id="googleSheetUrl" placeholder="https://webapp-url..."></div>
+      <div class="row"><label>Auto-translate</label><input type="checkbox" id="autoTranslate"></div>
+      <button class="btn btn-secondary" id="testApi" style="margin-top:6px;width:100%">Test DeepSeek Connection</button>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-title" onclick="toggleSection(this)"><span>Fonts <button class="btn btn-small btn-secondary" id="addFont" onclick="event.stopPropagation()">+ Add</button></span><span class="toggle-icon">▼</span></div>
+    <div class="section-content">
+      <div id="fonts-list"></div>
+    </div>
   </div>
   <button id="export" class="btn btn-primary" style="width:100%">Export</button>
 </div>
@@ -92,6 +104,32 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active');
     document.getElementById(tab.dataset.tab).classList.add('active');
   };
+});
+
+// Collapsible sections
+function toggleSection(titleEl) {
+  const content = titleEl.nextElementSibling;
+  const isCollapsed = content.classList.contains('collapsed');
+  
+  if (isCollapsed) {
+    content.classList.remove('collapsed');
+    content.style.maxHeight = content.scrollHeight + 'px';
+    titleEl.classList.remove('collapsed');
+  } else {
+    content.style.maxHeight = content.scrollHeight + 'px';
+    requestAnimationFrame(() => {
+      content.classList.add('collapsed');
+      content.style.maxHeight = '0px';
+      titleEl.classList.add('collapsed');
+    });
+  }
+}
+
+// Initialize section heights
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.section-content').forEach(content => {
+    content.style.maxHeight = content.scrollHeight + 'px';
+  });
 });
 
 // Settings object
@@ -425,6 +463,13 @@ Input JSON: ${JSON.stringify(textsMap)}`
 
     // Add collection file
     zip.file(pluginMessage.zipName + '.collection', pluginMessage.collectionContent);
+
+    // Add template GUI files if any
+    if (pluginMessage.templateGuiFiles && pluginMessage.templateGuiFiles.length > 0) {
+      pluginMessage.templateGuiFiles.forEach(template => {
+        zip.folder('templates').file(template.name, template.content);
+      });
+    }
 
     // Generate and download zip
     document.getElementById('status-text').textContent = 'Creating ZIP...';

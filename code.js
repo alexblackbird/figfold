@@ -26,6 +26,8 @@ var scriptContent = '';
 var collectionContent = '';
 var textsForTranslation = [];
 var emptyContainerIds = new Set();
+var templateGuiFiles = []; // { name: string, content: string }
+var processedComponentIds = new Set(); // Track unique components to avoid duplicate templates
 
 // Check if a node is an empty container (no visible fills AND no visible strokes)
 function isEmptyContainer(node) {
@@ -117,6 +119,56 @@ async function exportLayer(node) {
                         grandchild.visible = true;
                     }
                     await exportLayer(child);
+                }
+                
+                // Export INSTANCE node's mainComponent as texture for templates
+                if (child.type === "INSTANCE" && child.mainComponent) {
+                    const componentId = child.mainComponent.id;
+                    // Check if we already exported this component texture
+                    if (!processedComponentIds.has(componentId)) {
+                        try {
+                            const componentName = child.mainComponent.name.replace(/\[.*?\]/g, '').trim();
+                            const instanceName = child.name;
+                            
+                            // Apply [p] logic - hide children before export
+                            let hiddenChildren = [];
+                            if (instanceName.includes("[p]") && child.children) {
+                                for (let grandchild of child.children) {
+                                    if (grandchild.visible) {
+                                        hiddenChildren.push(grandchild);
+                                        grandchild.visible = false;
+                                    }
+                                }
+                            }
+                            
+                            // Apply [corner] logic - resize to corner radius
+                            let originalSize = null;
+                            if (instanceName.includes("[corner]") && child.cornerRadius) {
+                                originalSize = { width: child.width, height: child.height };
+                                const newSize = child.cornerRadius * 2;
+                                child.resize(newSize, newSize);
+                            }
+                            
+                            // Export
+                            const value = await child.exportAsync(exportSettings);
+                            all_atlas_images.push({
+                                name: componentName + '.png',
+                                value: value,
+                            });
+                            
+                            // Restore [corner] size
+                            if (originalSize) {
+                                child.resize(originalSize.width, originalSize.height);
+                            }
+                            
+                            // Restore [p] children visibility
+                            for (let grandchild of hiddenChildren) {
+                                grandchild.visible = true;
+                            }
+                        } catch (err) {
+                            console.error("Error exporting INSTANCE texture:", err);
+                        }
+                    }
                 }
             } catch (error) {
                 console.error("Ошибка при экспорте слоя:", error, "Слой:", child);
@@ -270,6 +322,37 @@ function parseNodeOfTree(node, parent_name) {
                 var offset_y = (target_project.height / 2) * SCALE;
                 layerPosition.x -= offset_x;
                 layerPosition.y -= offset_y;
+            }
+
+            // Handle INSTANCE nodes - create template and add reference, skip regular node
+            if (child.type === "INSTANCE") {
+                createTemplateGui(child);
+                
+                var templateName = (child.mainComponent ? child.mainComponent.name : child.name).replace(/\[.*?\]/g, '').trim();
+                var instanceId = child.name.replace(/\[.*?\]/g, '').trim();
+                
+                guiContent += 'nodes {\n';
+                guiContent += '  position {\n';
+                guiContent += '    x: ' + layerPosition.x + '\n';
+                guiContent += '    y: ' + layerPosition.y + '\n';
+                guiContent += '  }\n';
+                guiContent += '  scale {\n';
+                guiContent += '    x: 1.0\n';
+                guiContent += '    y: 1.0\n';
+                guiContent += '    z: 1.0\n';
+                guiContent += '    w: 1.0\n';
+                guiContent += '  }\n';
+                guiContent += '  type: TYPE_TEMPLATE\n';
+                guiContent += '  id: "' + instanceId + '"\n';
+                guiContent += '  inherit_alpha: true\n';
+                guiContent += '  alpha: 1.0\n';
+                guiContent += '  template: "/assets/' + frame_name + '/templates/' + templateName + '.gui"\n';
+                if (parent_name) {
+                    guiContent += '  parent: "' + parent_name + '"\n';
+                }
+                guiContent += '}\n';
+                
+                continue; // Skip regular node creation for INSTANCE
             }
 
             if (child.type === "TEXT") {
@@ -508,7 +591,285 @@ function parseNodeOfTree(node, parent_name) {
         if (child.name.includes("[p]") && child.children) {
             parseNodeOfTree(child, layerName)
         }
+
+
     }
+}
+
+// Create template GUI file for INSTANCE nodes
+function createTemplateGui(instanceNode) {
+    // Get the main component ID to avoid duplicates
+    var mainComponent = instanceNode.mainComponent;
+    var componentId = mainComponent ? mainComponent.id : instanceNode.id;
+    
+    // Skip if we already processed this component
+    if (processedComponentIds.has(componentId)) {
+        return;
+    }
+    processedComponentIds.add(componentId);
+    
+    // Use mainComponent for naming, instanceNode for dimensions
+    var sourceNode = mainComponent || instanceNode;
+    var templateName = sourceNode.name.replace(/\[.*?\]/g, '').trim();
+    var instanceName = instanceNode.name;
+    var isCorner = instanceName.includes("[corner]");
+    var cornerRadius = instanceNode.cornerRadius || 0;
+    
+    var templateContent = '';
+    
+    // Add fonts
+    for (var i = 0; i < target_project_fonts.length; i++) {
+        var font = target_project_fonts[i];
+        templateContent += 'fonts {\n';
+        templateContent += '  name: "' + font.name + '"\n';
+        templateContent += '  font: "' + font.fontPath + '"\n';
+        templateContent += '}\n';
+    }
+    
+    // Reference main texture (parent atlas)
+    templateContent += 'textures {\n';
+    templateContent += '  name: "' + frame_name + '"\n';
+    templateContent += '  texture: "/assets/' + frame_name + '/' + frame_name + '.atlas"\n';
+    templateContent += '}\n';
+    
+    // Create root node for the template (the component wrapper)
+    // Use instanceNode dimensions (original size before corner crop)
+    var nodesContent = '';
+    nodesContent += 'nodes {\n';
+    nodesContent += '  position {\n';
+    nodesContent += '    x: 0.0\n';
+    nodesContent += '    y: 0.0\n';
+    nodesContent += '  }\n';
+    nodesContent += '  scale {\n';
+    nodesContent += '    x: ' + SCALE + '\n';
+    nodesContent += '    y: ' + SCALE + '\n';
+    nodesContent += '    z: 1.0\n';
+    nodesContent += '    w: 1.0\n';
+    nodesContent += '  }\n';
+    nodesContent += '  size {\n';
+    nodesContent += '    x: ' + instanceNode.width + '\n';
+    nodesContent += '    y: ' + instanceNode.height + '\n';
+    nodesContent += '    z: 0.0\n';
+    nodesContent += '    w: 1.0\n';
+    nodesContent += '  }\n';
+    nodesContent += '  color {\n';
+    nodesContent += '    x: 1.0\n';
+    nodesContent += '    y: 1.0\n';
+    nodesContent += '    z: 1.0\n';
+    nodesContent += '    w: 1.0\n';
+    nodesContent += '  }\n';
+    nodesContent += '  type: TYPE_BOX\n';
+    nodesContent += '  blend_mode: BLEND_MODE_ALPHA\n';
+    nodesContent += '  texture: "' + frame_name + '/' + templateName + '"\n';
+    nodesContent += '  id: "' + templateName + '"\n';
+    nodesContent += '  xanchor: XANCHOR_NONE\n';
+    nodesContent += '  yanchor: YANCHOR_NONE\n';
+    nodesContent += '  pivot: PIVOT_CENTER\n';
+    nodesContent += '  adjust_mode: ADJUST_MODE_FIT\n';
+    nodesContent += '  layer: ""\n';
+    nodesContent += '  inherit_alpha: true\n';
+    
+    // Add slice9 based on cornerRadius for [corner] nodes
+    if (isCorner && cornerRadius > 0) {
+        nodesContent += '  slice9 {\n';
+        nodesContent += '    x: ' + cornerRadius + '\n';
+        nodesContent += '    y: ' + cornerRadius + '\n';
+        nodesContent += '    z: ' + cornerRadius + '\n';
+        nodesContent += '    w: ' + cornerRadius + '\n';
+        nodesContent += '  }\n';
+    } else {
+        nodesContent += '  slice9 {\n';
+        nodesContent += '    x: 0.0\n';
+        nodesContent += '    y: 0.0\n';
+        nodesContent += '    z: 0.0\n';
+        nodesContent += '    w: 0.0\n';
+        nodesContent += '  }\n';
+    }
+    
+    nodesContent += '  clipping_mode: CLIPPING_MODE_NONE\n';
+    nodesContent += '  clipping_visible: true\n';
+    nodesContent += '  clipping_inverted: false\n';
+    nodesContent += '  alpha: 1.0\n';
+    nodesContent += '  template_node_child: false\n';
+    
+    // Use SIZE_MODE_MANUAL for corner nodes so slice9 works
+    if (isCorner) {
+        nodesContent += '  size_mode: SIZE_MODE_MANUAL\n';
+    } else {
+        nodesContent += '  size_mode: SIZE_MODE_AUTO\n';
+    }
+    
+    nodesContent += '  custom_type: 0\n';
+    nodesContent += '  enabled: true\n';
+    nodesContent += '  visible: true\n';
+    nodesContent += '  material: ""\n';
+    nodesContent += '}\n';
+    
+    // Parse children - pass instanceNode for correct positioning
+    if (instanceNode.children) {
+        nodesContent += parseTemplateNodes(instanceNode, templateName, instanceNode);
+    }
+    
+    templateContent += nodesContent;
+    templateContent += 'layers {\n';
+    templateContent += '   name: "text"\n';
+    templateContent += '}\n';
+    templateContent += 'material: "/builtins/materials/gui.material"\n';
+    templateContent += 'adjust_reference: ADJUST_REFERENCE_PARENT\n';
+    templateContent += 'max_nodes: 512\n';
+    
+    templateGuiFiles.push({
+        name: templateName + '.gui',
+        content: templateContent
+    });
+}
+
+// Parse template instance nodes recursively
+function parseTemplateNodes(node, parent_name, rootNode) {
+    if (!node.children) {
+        return '';
+    }
+    
+    var result = '';
+    
+    for (let child of node.children) {
+        if (child.name != "[exclude]") {
+            var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
+            
+            // Calculate position relative to parent CENTER (not corner)
+            // child.x/y are relative to parent's top-left corner
+            // We need to convert to center-based coordinates
+            var parentCenterX = rootNode.width / 2;
+            var parentCenterY = rootNode.height / 2;
+            var childCenterX = child.x + child.width / 2;
+            var childCenterY = child.y + child.height / 2;
+            
+            // posX: offset from parent center (positive = right)
+            // posY: offset from parent center (positive = up, so we flip Y)
+            var posX = childCenterX - parentCenterX;
+            var posY = parentCenterY - childCenterY;
+            
+            var nodeContent = 'nodes {\n';
+            nodeContent += '  position {\n';
+            nodeContent += '    x: ' + posX + '\n';
+            nodeContent += '    y: ' + posY + '\n';
+            nodeContent += '  }\n';
+            
+            if (child.type === "TEXT") {
+                var textSize = child.fontSize;
+                var text_scale = textSize / max_font_scale;
+                var textWidth = child.width / text_scale;
+                var textHeight = child.height / text_scale;
+                var textContent = child.characters.replace(/\n/g, "\\n");
+                
+                const fills = child.fills;
+                var r = 1.0, g = 1.0, b = 1.0;
+                if (fills && fills.length > 0 && fills[0].color) {
+                    r = fills[0].color.r;
+                    g = fills[0].color.g;
+                    b = fills[0].color.b;
+                }
+                
+                nodeContent += '  size {\n';
+                nodeContent += '    x: ' + textWidth.toFixed(2) + '\n';
+                nodeContent += '    y: ' + textHeight.toFixed(2) + '\n';
+                nodeContent += '    z: 0.0\n';
+                nodeContent += '    w: 1.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  color {\n';
+                nodeContent += '    x: ' + r.toFixed(2) + '\n';
+                nodeContent += '    y: ' + g.toFixed(2) + '\n';
+                nodeContent += '    z: ' + b.toFixed(2) + '\n';
+                nodeContent += '    w: 1.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  scale {\n';
+                nodeContent += '    x: ' + text_scale.toFixed(2) + '\n';
+                nodeContent += '    y: ' + text_scale.toFixed(2) + '\n';
+                nodeContent += '    z: 1.0\n';
+                nodeContent += '    w: 1.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  type: TYPE_TEXT\n';
+                nodeContent += '  blend_mode: BLEND_MODE_ALPHA\n';
+                nodeContent += '  text: "' + textContent + '"\n';
+                nodeContent += '  font: "' + (child.fontWeight == 600 ? 'font_bold' : 'font_regular') + '"\n';
+                nodeContent += '  id: "text"\n';
+                nodeContent += '  xanchor: XANCHOR_NONE\n';
+                nodeContent += '  yanchor: YANCHOR_NONE\n';
+                nodeContent += '  pivot: PIVOT_CENTER\n';
+                nodeContent += '  adjust_mode: ADJUST_MODE_FIT\n';
+                nodeContent += '  line_break: false\n';
+                nodeContent += '  layer: "text"\n';
+                nodeContent += '  inherit_alpha: true\n';
+                nodeContent += '  alpha: 1.0\n';
+                nodeContent += '  outline_alpha: 0.0\n';
+                nodeContent += '  template_node_child: false\n';
+                nodeContent += '  text_leading: 1.1\n';
+                nodeContent += '  text_tracking: 0.0\n';
+                nodeContent += '  custom_type: 0\n';
+                nodeContent += '  enabled: true\n';
+                nodeContent += '  visible: true\n';
+                nodeContent += '  material: ""\n';
+            } else {
+                nodeContent += '  scale {\n';
+                nodeContent += '    x: ' + SCALE + '\n';
+                nodeContent += '    y: ' + SCALE + '\n';
+                nodeContent += '    z: 1.0\n';
+                nodeContent += '    w: 1.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  size {\n';
+                nodeContent += '    x: 200.0\n';
+                nodeContent += '    y: 100.0\n';
+                nodeContent += '    z: 0.0\n';
+                nodeContent += '    w: 1.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  color {\n';
+                nodeContent += '    x: 1.0\n';
+                nodeContent += '    y: 1.0\n';
+                nodeContent += '    z: 1.0\n';
+                nodeContent += '    w: 1.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  type: TYPE_BOX\n';
+                nodeContent += '  blend_mode: BLEND_MODE_ALPHA\n';
+                nodeContent += '  texture: "' + frame_name + '/' + layerName + '"\n';
+                nodeContent += '  id: "' + layerName + '"\n';
+                nodeContent += '  xanchor: XANCHOR_NONE\n';
+                nodeContent += '  yanchor: YANCHOR_NONE\n';
+                nodeContent += '  pivot: PIVOT_CENTER\n';
+                nodeContent += '  adjust_mode: ADJUST_MODE_FIT\n';
+                nodeContent += '  layer: ""\n';
+                nodeContent += '  inherit_alpha: true\n';
+                nodeContent += '  slice9 {\n';
+                nodeContent += '    x: 0.0\n';
+                nodeContent += '    y: 0.0\n';
+                nodeContent += '    z: 0.0\n';
+                nodeContent += '    w: 0.0\n';
+                nodeContent += '  }\n';
+                nodeContent += '  clipping_mode: CLIPPING_MODE_NONE\n';
+                nodeContent += '  clipping_visible: true\n';
+                nodeContent += '  clipping_inverted: false\n';
+                nodeContent += '  alpha: 1.0\n';
+                nodeContent += '  template_node_child: false\n';
+                nodeContent += '  size_mode: SIZE_MODE_AUTO\n';
+                nodeContent += '  custom_type: 0\n';
+                nodeContent += '  enabled: true\n';
+                nodeContent += '  visible: true\n';
+                nodeContent += '  material: ""\n';
+            }
+            
+            if (parent_name) {
+                nodeContent += '  parent: "' + parent_name + '"\n';
+            }
+            
+            nodeContent += '}\n';
+            result += nodeContent;
+            
+            if (child.children) {
+                result += parseTemplateNodes(child, layerName, rootNode);
+            }
+        }
+    }
+    
+    return result;
 }
 
 function createCollectionContent(selection) {
@@ -592,6 +953,43 @@ function createScriptFile(selection) {
                 for (let child of node.children) {
                     if (child.name != "[exclude]") {
                         var layerName = child.name.replace(/\[corner\]/g, "").replace(/\[p\]/g, "");
+
+                        // Handle INSTANCE nodes - iterate their children with instanceId prefix
+                        if (child.type === "INSTANCE") {
+                            var instanceId = child.name.replace(/\[.*?\]/g, '').trim();
+                            
+                            // Iterate instance children for text nodes
+                            if (child.children) {
+                                for (let instanceChild of child.children) {
+                                    if (instanceChild.type == "TEXT") {
+                                        var textContent = instanceChild.characters;
+                                        var cleanTextContent = textContent.replace(/\r/g, "");
+                                        var withTextContent = textContent.replace(/\n/g, "\\n");
+
+                                        if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
+                                            var langKey = frame_name.toUpperCase() + '_' + instanceId.toUpperCase() + '_TEXT';
+                                            var nodePath = instanceId + '/text';
+                                            scriptContent += '        lang.set("' + nodePath + '", "' + langKey + '")\n';
+                                            // Collect for translation
+                                            var exists = false;
+                                            for(var t = 0; t < textsForTranslation.length; t++) {
+                                                if(textsForTranslation[t].key === langKey) {
+                                                    exists = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (!exists) {
+                                                textsForTranslation.push({ key: langKey, text: cleanTextContent });
+                                            }
+                                        } else {
+                                            var nodePath = instanceId + '/text';
+                                            scriptContent += '        gui.set_text(gui.get_node("' + nodePath + '"), "' + withTextContent + '")\n';
+                                        }
+                                    }
+                                }
+                            }
+                            continue; // Skip regular processing for INSTANCE
+                        }
 
                         if (child.type == "TEXT") {
                             var textContent = child.characters;
@@ -706,7 +1104,8 @@ function SAVE_ALL() {
         autoTranslate: autoTranslate,
         apiKey: apiKey,
         languages: languages,
-        googleSheetUrl: googleSheetUrl
+        googleSheetUrl: googleSheetUrl,
+        templateGuiFiles: templateGuiFiles
     });
 }
 
@@ -747,6 +1146,8 @@ function startExport(selection) {
         collectionContent = '';
         textsForTranslation = [];
         emptyContainerIds.clear();
+        templateGuiFiles = [];
+        processedComponentIds.clear();
 
         exportLayersToPNG(selection);
     }
