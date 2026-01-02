@@ -28,6 +28,8 @@ var textsForTranslation = [];
 var emptyContainerIds = new Set();
 var templateGuiFiles = []; // { name: string, content: string }
 var processedComponentIds = new Set(); // Track unique components to avoid duplicate templates
+var addedHiddenTemplates = new Set(); // Track which templates are already added hidden on scene
+var instanceDataForClone = []; // { templateName, instanceId, x, y, textContent } for code generation
 
 // Check if a node is an empty container (no visible fills AND no visible strokes)
 function isEmptyContainer(node) {
@@ -66,6 +68,42 @@ function updateExportSettings() {
     };
 }
 var exportSettings = updateExportSettings();
+
+// Compare fills between instance and mainComponent
+function fillsAreDifferent(instanceNode, mainComponent) {
+    if (!instanceNode || !mainComponent) return false;
+    
+    // Get fills from both
+    var instanceFills = instanceNode.fills || [];
+    var componentFills = mainComponent.fills || [];
+    
+    // If different number of fills
+    if (instanceFills.length !== componentFills.length) return true;
+    
+    // Compare each fill
+    for (var i = 0; i < instanceFills.length; i++) {
+        var iFill = instanceFills[i];
+        var cFill = componentFills[i];
+        
+        // Compare type
+        if (iFill.type !== cFill.type) return true;
+        
+        // Compare color if solid
+        if (iFill.type === 'SOLID' && cFill.type === 'SOLID') {
+            if (!iFill.color || !cFill.color) return true;
+            if (Math.abs(iFill.color.r - cFill.color.r) > 0.01) return true;
+            if (Math.abs(iFill.color.g - cFill.color.g) > 0.01) return true;
+            if (Math.abs(iFill.color.b - cFill.color.b) > 0.01) return true;
+        }
+        
+        // Compare opacity
+        var iOpacity = iFill.opacity !== undefined ? iFill.opacity : 1;
+        var cOpacity = cFill.opacity !== undefined ? cFill.opacity : 1;
+        if (Math.abs(iOpacity - cOpacity) > 0.01) return true;
+    }
+    
+    return false;
+}
 
 // Экспортируем слои как PNG изображения
 async function exportLayer(node) {
@@ -124,49 +162,63 @@ async function exportLayer(node) {
                 // Export INSTANCE node's mainComponent as texture for templates
                 if (child.type === "INSTANCE" && child.mainComponent) {
                     const componentId = child.mainComponent.id;
-                    // Check if we already exported this component texture
-                    if (!processedComponentIds.has(componentId)) {
-                        try {
-                            const componentName = child.mainComponent.name.replace(/\[.*?\]/g, '').trim();
-                            const instanceName = child.name;
-                            
-                            // Apply [p] logic - hide children before export
-                            let hiddenChildren = [];
-                            if (instanceName.includes("[p]") && child.children) {
-                                for (let grandchild of child.children) {
-                                    if (grandchild.visible) {
-                                        hiddenChildren.push(grandchild);
-                                        grandchild.visible = false;
-                                    }
+                    const componentName = child.mainComponent.name.replace(/\[.*?\]/g, '').trim();
+                    const instanceName = child.name;
+                    const instanceId = instanceName.replace(/\[.*?\]/g, '').trim();
+                    
+                    // Store state for restoration
+                    let hiddenChildren = [];
+                    let originalSize = null;
+                    
+                    try {
+                        // Check if fills are different from mainComponent
+                        const isDifferent = fillsAreDifferent(child, child.mainComponent);
+                        
+                        // Apply [p] logic - hide children before export
+                        if (instanceName.includes("[p]") && child.children) {
+                            for (let grandchild of child.children) {
+                                if (grandchild.visible) {
+                                    hiddenChildren.push(grandchild);
+                                    grandchild.visible = false;
                                 }
                             }
-                            
-                            // Apply [corner] logic - resize to corner radius
-                            let originalSize = null;
-                            if (instanceName.includes("[corner]") && child.cornerRadius) {
-                                originalSize = { width: child.width, height: child.height };
-                                const newSize = child.cornerRadius * 2;
-                                child.resize(newSize, newSize);
-                            }
-                            
-                            // Export
+                        }
+                        
+                        // Apply [corner] logic - resize to corner radius
+                        if (instanceName.includes("[corner]") && child.cornerRadius) {
+                            originalSize = { width: child.width, height: child.height };
+                            const newSize = child.cornerRadius * 2;
+                            child.resize(newSize, newSize);
+                        }
+                        
+                        // Export base component texture only once
+                        if (!processedComponentIds.has(componentId)) {
                             const value = await child.exportAsync(exportSettings);
                             all_atlas_images.push({
                                 name: componentName + '.png',
                                 value: value,
                             });
-                            
-                            // Restore [corner] size
-                            if (originalSize) {
-                                child.resize(originalSize.width, originalSize.height);
-                            }
-                            
-                            // Restore [p] children visibility
-                            for (let grandchild of hiddenChildren) {
-                                grandchild.visible = true;
-                            }
-                        } catch (err) {
-                            console.error("Error exporting INSTANCE texture:", err);
+                        }
+                        
+                        // If instance has different fills, export with unique name
+                        if (isDifferent && instanceId !== componentName) {
+                            const value = await child.exportAsync(exportSettings);
+                            all_atlas_images.push({
+                                name: instanceId + '.png',
+                                value: value,
+                            });
+                        }
+                    } catch (err) {
+                        console.error("Error exporting INSTANCE texture:", err);
+                    } finally {
+                        // Always restore [corner] size
+                        if (originalSize) {
+                            child.resize(originalSize.width, originalSize.height);
+                        }
+                        
+                        // Always restore [p] children visibility
+                        for (let grandchild of hiddenChildren) {
+                            grandchild.visible = true;
                         }
                     }
                 }
@@ -324,35 +376,62 @@ function parseNodeOfTree(node, parent_name) {
                 layerPosition.y -= offset_y;
             }
 
-            // Handle INSTANCE nodes - create template and add reference, skip regular node
+            // Handle INSTANCE nodes - add hidden template once, collect data for code clone
             if (child.type === "INSTANCE") {
                 createTemplateGui(child);
                 
                 var templateName = (child.mainComponent ? child.mainComponent.name : child.name).replace(/\[.*?\]/g, '').trim();
                 var instanceId = child.name.replace(/\[.*?\]/g, '').trim();
                 
-                guiContent += 'nodes {\n';
-                guiContent += '  position {\n';
-                guiContent += '    x: ' + layerPosition.x + '\n';
-                guiContent += '    y: ' + layerPosition.y + '\n';
-                guiContent += '  }\n';
-                guiContent += '  scale {\n';
-                guiContent += '    x: 1.0\n';
-                guiContent += '    y: 1.0\n';
-                guiContent += '    z: 1.0\n';
-                guiContent += '    w: 1.0\n';
-                guiContent += '  }\n';
-                guiContent += '  type: TYPE_TEMPLATE\n';
-                guiContent += '  id: "' + instanceId + '"\n';
-                guiContent += '  inherit_alpha: true\n';
-                guiContent += '  alpha: 1.0\n';
-                guiContent += '  template: "/assets/' + frame_name + '/templates/' + templateName + '.gui"\n';
-                if (parent_name) {
-                    guiContent += '  parent: "' + parent_name + '"\n';
+                // Add hidden template node only once per unique template
+                if (!addedHiddenTemplates.has(templateName)) {
+                    addedHiddenTemplates.add(templateName);
+                    
+                    guiContent += 'nodes {\n';
+                    guiContent += '  position {\n';
+                    guiContent += '    x: 0.0\n';
+                    guiContent += '    y: -2105.0\n';
+                    guiContent += '  }\n';
+                    guiContent += '  scale {\n';
+                    guiContent += '    x: 1.0\n';
+                    guiContent += '    y: 1.0\n';
+                    guiContent += '    z: 1.0\n';
+                    guiContent += '    w: 1.0\n';
+                    guiContent += '  }\n';
+                    guiContent += '  type: TYPE_TEMPLATE\n';
+                    guiContent += '  id: "' + templateName + '"\n';
+                    guiContent += '  inherit_alpha: true\n';
+                    guiContent += '  alpha: 1.0\n';
+                    guiContent += '  template: "/assets/' + frame_name + '/templates/' + templateName + '.gui"\n';
+                    guiContent += '  enabled: false\n';
+                    if (parent_name) {
+                        guiContent += '  parent: "' + parent_name + '"\n';
+                    }
+                    guiContent += '}\n';
                 }
-                guiContent += '}\n';
                 
-                continue; // Skip regular node creation for INSTANCE
+                // Collect instance data for code generation (clone_tree)
+                var textContent = '';
+                if (child.children) {
+                    for (let grandchild of child.children) {
+                        if (grandchild.type === 'TEXT') {
+                            textContent = grandchild.characters;
+                            break;
+                        }
+                    }
+                }
+                
+                instanceDataForClone.push({
+                    templateName: templateName,
+                    instanceId: instanceId,
+                    x: layerPosition.x,
+                    y: layerPosition.y,
+                    textContent: textContent,
+                    parentName: parent_name || '',
+                    hasCustomTexture: fillsAreDifferent(child, child.mainComponent) && instanceId !== templateName
+                });
+                
+                continue; // Skip regular node creation - will be cloned from code
             }
 
             if (child.type === "TEXT") {
@@ -930,6 +1009,70 @@ function createScriptFile(selection) {
     scriptContent += '    gui.set_render_order(13)\n';
     scriptContent += '\n';
     scriptContent += '    -- инциализация анимации\n';
+    
+    // Generate code to clone instances from templates
+    if (instanceDataForClone.length > 0) {
+        scriptContent += '    -- create template instances\n';
+        scriptContent += '    self.instances = {}\n'; // Store instances if needed
+        
+        for (let data of instanceDataForClone) {
+            let instanceId = data.instanceId;
+            let templateName = data.templateName;
+            
+            // local <instanceId> = gui.clone_tree(gui.get_node("<templateName>/<templateName>"))
+            // We clone the root node of the template instance on the scene
+            scriptContent += '    local ' + instanceId + ' = gui.clone_tree(gui.get_node("' + templateName + '/' + templateName + '"))\n';
+            
+            // gui.set_position(<instanceId>["<templateName>/<templateName>"], vmath.vector3(x, y, 0))
+            scriptContent += '    gui.set_position(' + instanceId + '["' + templateName + '/' + templateName + '"], vmath.vector3(' + data.x + ', ' + data.y + ', 0))\n';
+            
+            // gui.set_enabled(<instanceId>["<templateName>/<templateName>"], true)
+            scriptContent += '    gui.set_enabled(' + instanceId + '["' + templateName + '/' + templateName + '"], true)\n';
+            
+            // Parenting
+            if (data.parentName) {
+                scriptContent += '    gui.set_parent(' + instanceId + '["' + templateName + '/' + templateName + '"], gui.get_node("' + data.parentName + '"))\n';
+            }
+
+            // Override texture if needed
+            if (data.hasCustomTexture) {
+                // gui.set_texture(<instanceId>["<templateName>/<templateName>"], "<instanceId>")
+                scriptContent += '    gui.set_texture(' + instanceId + '["' + templateName + '/' + templateName + '"], "' + instanceId + '")\n';
+            }
+
+            // Set text if needed
+            if (data.textContent) {
+                var cleanTextContent = data.textContent.replace(/\r/g, "");
+                var withTextContent = data.textContent.replace(/\n/g, "\\n");
+                var textNodePath = templateName + '/text'; // Path to text node in the clone map
+
+                if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
+                    // Create lang key: FRAME_INSTANCEID_TEXT
+                    var langKey = frame_name.toUpperCase() + '_' + instanceId.toUpperCase() + '_TEXT';
+                    
+                    // lang.set(instanceId["templateName/text"], "KEY")
+                    scriptContent += '    lang.set(' + instanceId + '["' + textNodePath + '"], "' + langKey + '")\n';
+
+                    // Collect for translation
+                    var exists = false;
+                    for(var t = 0; t < textsForTranslation.length; t++) {
+                         if(textsForTranslation[t].key === langKey) {
+                             exists = true;
+                             break;
+                         }
+                    }
+                    if (!exists) {
+                         textsForTranslation.push({ key: langKey, text: cleanTextContent });
+                    }
+                } else {
+                    // gui.set_text(instanceId["templateName/text"], "content")
+                    scriptContent += '    gui.set_text(' + instanceId + '["' + textNodePath + '"], "' + withTextContent + '")\n';
+                }
+            }
+        }
+        scriptContent += '\n';
+    }
+
     scriptContent += '    popup.set_animation(self, "background")\n';
     scriptContent += 'end\n';
     scriptContent += '\n';
@@ -956,39 +1099,8 @@ function createScriptFile(selection) {
 
                         // Handle INSTANCE nodes - iterate their children with instanceId prefix
                         if (child.type === "INSTANCE") {
-                            var instanceId = child.name.replace(/\[.*?\]/g, '').trim();
-                            
-                            // Iterate instance children for text nodes
-                            if (child.children) {
-                                for (let instanceChild of child.children) {
-                                    if (instanceChild.type == "TEXT") {
-                                        var textContent = instanceChild.characters;
-                                        var cleanTextContent = textContent.replace(/\r/g, "");
-                                        var withTextContent = textContent.replace(/\n/g, "\\n");
-
-                                        if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
-                                            var langKey = frame_name.toUpperCase() + '_' + instanceId.toUpperCase() + '_TEXT';
-                                            var nodePath = instanceId + '/text';
-                                            scriptContent += '        lang.set("' + nodePath + '", "' + langKey + '")\n';
-                                            // Collect for translation
-                                            var exists = false;
-                                            for(var t = 0; t < textsForTranslation.length; t++) {
-                                                if(textsForTranslation[t].key === langKey) {
-                                                    exists = true;
-                                                    break;
-                                                }
-                                            }
-                                            if (!exists) {
-                                                textsForTranslation.push({ key: langKey, text: cleanTextContent });
-                                            }
-                                        } else {
-                                            var nodePath = instanceId + '/text';
-                                            scriptContent += '        gui.set_text(gui.get_node("' + nodePath + '"), "' + withTextContent + '")\n';
-                                        }
-                                    }
-                                }
-                            }
-                            continue; // Skip regular processing for INSTANCE
+                            // Instance creation and text setting is now handled in init() specific for clones
+                            continue; 
                         }
 
                         if (child.type == "TEXT") {
@@ -1023,6 +1135,10 @@ function createScriptFile(selection) {
 
                 for (let child of node.children) {
                     if (child.name != "[exclude]") {
+                        // Skip INSTANCE nodes - they're already handled above
+                        if (child.type === "INSTANCE") {
+                            continue;
+                        }
                         if (child.name.includes("[p]")) {
                             iterateTree(child)
                         }
@@ -1148,6 +1264,8 @@ function startExport(selection) {
         emptyContainerIds.clear();
         templateGuiFiles = [];
         processedComponentIds.clear();
+        addedHiddenTemplates.clear();
+        instanceDataForClone = [];
 
         exportLayersToPNG(selection);
     }
