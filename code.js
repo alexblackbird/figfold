@@ -322,6 +322,10 @@ async function exportLayersToPNG(selection) {
                 frame_name = node.name;
 
                 if (node.children) {
+                    // Update target_project dimensions from the frame
+                    target_project.width = node.width;
+                    target_project.height = node.height;
+                    
                     await exportLayer(node);
                 }
             }
@@ -1327,7 +1331,41 @@ function createScriptFile(selection) {
             }
         }
         
-        // Refresh layouts after adding all elements
+        // Check for "root" and "content" nodes to create scroll
+    if (useDruid) {
+        let hasRoot = false;
+        let hasContent = false;
+        
+        function checkForScrollNodes(node) {
+            // Check exact name match / ignore tags
+            let cleanName = node.name.replace(/\[.*?\]/g, "").trim();
+            if (cleanName === "root") hasRoot = true;
+            if (cleanName === "content") hasContent = true;
+            
+            if (node.children) {
+                for (let child of node.children) {
+                    checkForScrollNodes(child);
+                }
+            }
+        }
+        
+        // Check in selection
+        if (selection && selection.length > 0) {
+             for (let node of selection) {
+                 checkForScrollNodes(node);
+             }
+        }
+        
+        if (hasRoot && hasContent) {
+            scriptContent += '    -- Init Scroll\n';
+            scriptContent += '    self.main_scroll = self.druid:new_scroll("root", "content")\n';
+            scriptContent += '    :set_horizontal_scroll(false)\n';
+            scriptContent += '    :set_extra_stretch_size(250)\n';
+            scriptContent += '\n';
+        }
+    }
+
+    // Refresh layouts after adding all elements
         if (useDruid && layoutContainers.size > 0) {
             scriptContent += '\n';
             for (let [id, data] of layoutContainers) {
@@ -1542,7 +1580,9 @@ function startExport(selection) {
 
 function applySettings(s) {
     if (!s) return;
-    target_project = { width: s.width || 1080, height: s.height || 1920 };
+    // target_project is now updated dynamically per frame in exportLayersToPNG
+    // target_project = { width: 1080, height: 1920 }; // Keep default or just rely on Frame logic.
+    // We don't overwrite it with s.width/s.height here anymore.
     target_project_fonts = s.fonts || target_project_fonts;
     is_use_background_node = s.useBackground !== false;
     max_font_scale = s.maxFontScale || 60;

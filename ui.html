@@ -56,8 +56,7 @@
   <div class="section">
     <div class="section-title" onclick="toggleSection(this)"><span>Project</span><span class="toggle-icon">▼</span></div>
     <div class="section-content">
-      <div class="row"><label>Width</label><input type="number" id="width" value="1080"></div>
-      <div class="row"><label>Height</label><input type="number" id="height" value="1920"></div>
+
       <div class="row"><label>Max Font Scale</label><input type="number" id="maxFontScale" value="60"></div>
       <div class="row"><label>Use Background</label><input type="checkbox" id="useBackground" checked></div>
       <div class="row"><label>Druid</label><input type="checkbox" id="useDruid" checked></div>
@@ -134,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Settings object
 let settings = {
-  width: 1080, height: 1920, maxFontScale: 60, useBackground: true, useDruid: true,
+  maxFontScale: 60, useBackground: true, useDruid: true,
   fonts: [
     { name: "font_bold", fontPath: "/assets/fonts/font_bold.font" },
     { name: "font_regular", fontPath: "/assets/fonts/font_regular.font" }
@@ -162,8 +161,6 @@ function renderFonts() {
 
 // ... (rest of code)
 function updateJson() {
-  settings.width = parseInt(document.getElementById('width').value);
-  settings.height = parseInt(document.getElementById('height').value);
   settings.maxFontScale = parseInt(document.getElementById('maxFontScale').value);
   settings.useBackground = document.getElementById('useBackground').checked;
   settings.useDruid = document.getElementById('useDruid').checked;
@@ -175,8 +172,6 @@ function updateJson() {
 }
 
 function applySettings() {
-  document.getElementById('width').value = settings.width;
-  document.getElementById('height').value = settings.height;
   document.getElementById('maxFontScale').value = settings.maxFontScale;
   document.getElementById('useBackground').checked = settings.useBackground;
   document.getElementById('useDruid').checked = settings.useDruid !== false;
