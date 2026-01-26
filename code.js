@@ -8,7 +8,7 @@ var target_project_fonts = [
     { name: "font_bold", fontPath: "/assets/fonts/font_bold.font" },
     { name: "font_regular", fontPath: "/assets/fonts/font_regular.font" },
 ];
-var is_use_background_node = true;
+var is_use_content_node = true;
 var max_font_scale = 60;
 var apiKey = "";
 var languages = "en,ru,de,fr,es,pt,ko,ja";
@@ -36,14 +36,14 @@ var layoutContainers = new Map(); // Store AutoLayout frame data: { id, mode, ma
 // Check if a node is an empty container (no visible fills AND no visible strokes)
 function isEmptyContainer(node) {
     // Check for visible strokes
-    var hasVisibleStroke = node.strokes && node.strokes.length > 0 && 
+    var hasVisibleStroke = node.strokes && node.strokes.length > 0 &&
         node.strokes.some(stroke => stroke.visible !== false);
     if (hasVisibleStroke) return false;
-    
+
     // Check for visible fills
     if (!node.fills || node.fills.length === 0) return true;
-    return node.fills.every(fill => 
-        fill.visible === false || 
+    return node.fills.every(fill =>
+        fill.visible === false ||
         (fill.type === 'SOLID' && (fill.opacity === 0 || (fill.color && fill.color.a === 0)))
     );
 }
@@ -74,22 +74,22 @@ var exportSettings = updateExportSettings();
 // Compare fills between instance and mainComponent
 function fillsAreDifferent(instanceNode, mainComponent) {
     if (!instanceNode || !mainComponent) return false;
-    
+
     // Get fills from both
     var instanceFills = instanceNode.fills || [];
     var componentFills = mainComponent.fills || [];
-    
+
     // If different number of fills
     if (instanceFills.length !== componentFills.length) return true;
-    
+
     // Compare each fill
     for (var i = 0; i < instanceFills.length; i++) {
         var iFill = instanceFills[i];
         var cFill = componentFills[i];
-        
+
         // Compare type
         if (iFill.type !== cFill.type) return true;
-        
+
         // Compare color if solid
         if (iFill.type === 'SOLID' && cFill.type === 'SOLID') {
             if (!iFill.color || !cFill.color) return true;
@@ -97,13 +97,13 @@ function fillsAreDifferent(instanceNode, mainComponent) {
             if (Math.abs(iFill.color.g - cFill.color.g) > 0.01) return true;
             if (Math.abs(iFill.color.b - cFill.color.b) > 0.01) return true;
         }
-        
+
         // Compare opacity
         var iOpacity = iFill.opacity !== undefined ? iFill.opacity : 1;
         var cOpacity = cFill.opacity !== undefined ? cFill.opacity : 1;
         if (Math.abs(iOpacity - cOpacity) > 0.01) return true;
     }
-    
+
     return false;
 }
 
@@ -133,26 +133,26 @@ async function exportLayer(node) {
                 function hasVisualChildren(node) {
                     if (!node.children) return false;
                     return node.children.some(c => {
-                         if (!c.visible) return false;
-                         if (c.type === 'GROUP') return hasVisualChildren(c);
-                         return ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'TEXT'].includes(c.type);
+                        if (!c.visible) return false;
+                        if (c.type === 'GROUP') return hasVisualChildren(c);
+                        return ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'TEXT'].includes(c.type);
                     });
                 }
-                
+
                 // Helper: Smart hide - hides only Layout Elements (Frame, Instance, Text) to prepare for baking background.
                 // Keeps primitives visible so they merge into the background image.
                 // Returns array of hidden elements to restore later.
                 function hideLayoutElements(container) {
                     let hidden = [];
-                    
+
                     function process(node) {
                         if (!node.children) return;
                         for (let c of node.children) {
                             // If element is already hidden, skip
                             if (!c.visible) continue;
-                            
+
                             const isLayoutElement = c.type === 'FRAME' || c.type === 'INSTANCE' || c.type === 'SECTION' || c.type === 'TEXT';
-                            
+
                             if (isLayoutElement) {
                                 c.visible = false;
                                 hidden.push(c);
@@ -167,18 +167,18 @@ async function exportLayer(node) {
                     process(container);
                     return hidden;
                 }
-                
+
                 // Determine if this is a Layout Container or a Visual Asset
                 const isLayout = hasLayoutChildren(child);
                 const hasVisuals = hasVisualChildren(child);
                 const isEmpty = isEmptyContainer(child);
-                
+
                 // --- HANDLING FOR GROUPS ---
                 if (child.type === "GROUP") {
                     if (child.children && child.children.length > 0) {
                         await exportLayer(child);
                     }
-                    continue; 
+                    continue;
                 }
 
                 // --- HANDLING FOR FRAMES ---
@@ -189,7 +189,7 @@ async function exportLayer(node) {
                         if (child.children && child.children.length > 0) {
                             await exportLayer(child);
                         }
-                        continue; 
+                        continue;
                     }
 
                     // 2. LAYOUT CONTAINER WITH BACKGROUND
@@ -198,7 +198,7 @@ async function exportLayer(node) {
                         // Smart hide: Hide Text/Frames, keep Shapes
                         hiddenElements = hideLayoutElements(child);
                     }
-                    
+
                     // 3. EXPORT IMAGE (Background + Shapes)
                     // -- EXPORT SECTION --
                     if (child.name.includes("[corner]")) {
@@ -229,8 +229,8 @@ async function exportLayer(node) {
                         await exportLayer(child);
                     }
                 } // End FRAME handling
-                
-                
+
+
                 // --- HANDLING FOR INSTANCES ---
                 if (child.type === "INSTANCE" && child.mainComponent) {
                     console.log('[INSTANCE EXPORT]', child.name, 'component:', child.mainComponent.name);
@@ -238,35 +238,35 @@ async function exportLayer(node) {
                     const componentName = child.mainComponent.name.replace(/\[.*?\]/g, '').trim();
                     const instanceName = child.name;
                     const instanceId = instanceName.replace(/\[.*?\]/g, '').trim();
-                    
+
                     const isEmptyInstance = isEmptyContainer(child);
-                    
+
                     let hiddenChildren = [];
                     let originalSize = null;
-                    
+
                     try {
                         // 1. EMPTY CONTAINER (Layout or Spacer)
                         if (isEmptyInstance && (isLayout || !hasVisuals)) {
                             console.log('[INSTANCE EMPTY]', child.name, '- skipping image export');
                             emptyContainerIds.add(child.id);
-                        } 
+                        }
                         // 2. EXPORT INSTANCE IMAGE
                         else {
                             // Check if fills are different from mainComponent
                             const isDifferent = fillsAreDifferent(child, child.mainComponent);
-                            
+
                             // Smart hide for layouts
                             if (isLayout) {
                                 hiddenChildren = hideLayoutElements(child);
                             }
-                            
+
                             // Apply [corner] logic - resize to corner radius
                             if (instanceName.includes("[corner]") && child.cornerRadius) {
                                 originalSize = { width: child.width, height: child.height };
                                 const newSize = child.cornerRadius * 2;
                                 child.resize(newSize, newSize);
                             }
-                            
+
                             // Export base component texture only once
                             if (!exportedComponentIds.has(componentId)) {
                                 const value = await child.exportAsync(exportSettings);
@@ -276,7 +276,7 @@ async function exportLayer(node) {
                                 });
                                 exportedComponentIds.add(componentId); // Mark as exported
                             }
-                            
+
                             // If instance has different fills, export with unique name
                             if (isDifferent && instanceId !== componentName) {
                                 const value = await child.exportAsync(exportSettings);
@@ -293,13 +293,13 @@ async function exportLayer(node) {
                         if (originalSize) {
                             child.resize(originalSize.width, originalSize.height);
                         }
-                        
+
                         // Restore children visibility
                         for (let el of hiddenChildren) {
                             el.visible = true;
                         }
                     }
-                    
+
                     // Only recurse if it's a Layout.
                     if (isLayout && child.children && child.children.length > 0) {
                         console.log('[INSTANCE RECURSE]', child.name, 'is Layout, recursing into', child.children.length, 'children');
@@ -325,7 +325,7 @@ async function exportLayersToPNG(selection) {
                     // Update target_project dimensions from the frame
                     target_project.width = node.width;
                     target_project.height = node.height;
-                    
+
                     await exportLayer(node);
                 }
             }
@@ -388,7 +388,7 @@ function createGUIFile(selection) {
 
 
 
-    if (is_use_background_node) {
+    if (is_use_content_node) {
         var position_x = (target_project.width / 2) * SCALE;
         var position_y = (target_project.height / 2) * SCALE;
 
@@ -399,7 +399,7 @@ function createGUIFile(selection) {
         guiContent += '  }\n';
         guiContent += '  type: TYPE_BOX\n';
         guiContent += '  texture: ""\n';
-        guiContent += '  id: "background"\n';
+        guiContent += '  id: "content"\n';
         guiContent += '  inherit_alpha: true\n';
         guiContent += '  size_mode: SIZE_MODE_MANUAL\n';
         guiContent += '}\n';
@@ -409,8 +409,8 @@ function createGUIFile(selection) {
         if (node.type === "FRAME") {
 
             let parent_name = ""
-            if (is_use_background_node) {
-                parent_name = 'background';
+            if (is_use_content_node) {
+                parent_name = 'content';
             }
 
             parseNodeOfTree(node, parent_name);
@@ -472,7 +472,7 @@ function parseNodeOfTree(node, parent_name) {
             layerPosition.x += child.width / 2
             layerPosition.y -= child.height / 2
 
-            if (is_use_background_node) {
+            if (is_use_content_node) {
                 var offset_x = (target_project.width / 2) * SCALE;
                 var offset_y = (target_project.height / 2) * SCALE;
                 layerPosition.x -= offset_x;
@@ -482,14 +482,14 @@ function parseNodeOfTree(node, parent_name) {
             // Handle INSTANCE nodes - add hidden template once, collect data for code clone
             if (child.type === "INSTANCE") {
                 createTemplateGui(child);
-                
+
                 var templateName = (child.mainComponent ? child.mainComponent.name : child.name).replace(/\[.*?\]/g, '').trim();
                 var instanceId = child.name.replace(/\[.*?\]/g, '').trim();
-                
+
                 // Add hidden template node only once per unique template
                 if (!addedHiddenTemplates.has(templateName)) {
                     addedHiddenTemplates.add(templateName);
-                    
+
                     guiContent += 'nodes {\n';
                     guiContent += '  position {\n';
                     guiContent += '    x: 0.0\n';
@@ -512,7 +512,7 @@ function parseNodeOfTree(node, parent_name) {
                     }
                     guiContent += '}\n';
                 }
-                
+
                 // Collect instance data for code generation (clone_tree)
                 var textContent = '';
                 if (child.children) {
@@ -523,7 +523,7 @@ function parseNodeOfTree(node, parent_name) {
                         }
                     }
                 }
-                
+
                 instanceDataForClone.push({
                     templateName: templateName,
                     instanceId: instanceId,
@@ -533,7 +533,7 @@ function parseNodeOfTree(node, parent_name) {
                     parentName: parent_name || '',
                     hasCustomTexture: fillsAreDifferent(child, child.mainComponent) && instanceId !== templateName
                 });
-                
+
                 continue; // Skip regular node creation - will be cloned from code
             }
 
@@ -722,9 +722,9 @@ function parseNodeOfTree(node, parent_name) {
             guiContent += ' yanchor: YANCHOR_NONE\n';
             guiContent += '  pivot: PIVOT_CENTER\n';
             if (isEmptyNode) {
-                 guiContent += ' adjust_mode: ADJUST_MODE_STRETCH\n';
+                guiContent += ' adjust_mode: ADJUST_MODE_STRETCH\n';
             } else {
-                 guiContent += ' adjust_mode: ADJUST_MODE_FIT\n';
+                guiContent += ' adjust_mode: ADJUST_MODE_FIT\n';
             }
             guiContent += '  layer: ""\n';
             guiContent += '  inherit_alpha: true\n';
@@ -794,13 +794,13 @@ function createTemplateGui(instanceNode) {
     // Get the main component ID to avoid duplicates
     var mainComponent = instanceNode.mainComponent;
     var componentId = mainComponent ? mainComponent.id : instanceNode.id;
-    
+
     // Skip if we already processed this component
     if (processedComponentIds.has(componentId)) {
         return;
     }
     processedComponentIds.add(componentId);
-    
+
     // Helper: Recursive check if node contains ANY layout elements
     function hasLayoutChildren(node) {
         if (!node.children) return false;
@@ -815,9 +815,9 @@ function createTemplateGui(instanceNode) {
     function hasVisualChildren(node) {
         if (!node.children) return false;
         return node.children.some(c => {
-             if (!c.visible) return false;
-             if (c.type === 'GROUP') return hasVisualChildren(c);
-             return ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'TEXT'].includes(c.type);
+            if (!c.visible) return false;
+            if (c.type === 'GROUP') return hasVisualChildren(c);
+            return ['RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'TEXT'].includes(c.type);
         });
     }
 
@@ -829,16 +829,16 @@ function createTemplateGui(instanceNode) {
     // If it's an Empty Layout OR an Empty Spacer (no visuals), use avoid_node
     const shouldAvoid = isEmpty && (isLayout || !hasVisuals);
 
-    
+
     // Use mainComponent for naming, instanceNode for dimensions
     var sourceNode = mainComponent || instanceNode;
     var templateName = sourceNode.name.replace(/\[.*?\]/g, '').trim();
     var instanceName = instanceNode.name;
     var isCorner = instanceName.includes("[corner]");
     var cornerRadius = instanceNode.cornerRadius || 0;
-    
+
     var templateContent = '';
-    
+
     // Add fonts
     for (var i = 0; i < target_project_fonts.length; i++) {
         var font = target_project_fonts[i];
@@ -847,13 +847,13 @@ function createTemplateGui(instanceNode) {
         templateContent += '  font: "' + font.fontPath + '"\n';
         templateContent += '}\n';
     }
-    
+
     // Reference main texture (parent atlas)
     templateContent += 'textures {\n';
     templateContent += '  name: "' + frame_name + '"\n';
     templateContent += '  texture: "/assets/' + frame_name + '/' + frame_name + '.atlas"\n';
     templateContent += '}\n';
-    
+
     // Create root node for the template (the component wrapper)
     // Use instanceNode dimensions (original size before corner crop)
     var nodesContent = '';
@@ -882,18 +882,18 @@ function createTemplateGui(instanceNode) {
     nodesContent += '  }\n';
     nodesContent += '  type: TYPE_BOX\n';
     nodesContent += '  blend_mode: BLEND_MODE_ALPHA\n';
-    
+
     if (shouldAvoid) {
         nodesContent += '  texture: "' + frame_name + '/avoid_node_empty"\n';
     } else {
         nodesContent += '  texture: "' + frame_name + '/' + templateName + '"\n';
     }
-    
+
     nodesContent += '  id: "' + templateName + '"\n';
     nodesContent += '  xanchor: XANCHOR_NONE\n';
     nodesContent += '  yanchor: YANCHOR_NONE\n';
     nodesContent += '  pivot: PIVOT_CENTER\n';
-    
+
     if (shouldAvoid) {
         nodesContent += '  adjust_mode: ADJUST_MODE_STRETCH\n';
     } else {
@@ -901,7 +901,7 @@ function createTemplateGui(instanceNode) {
     }
     nodesContent += '  layer: ""\n';
     nodesContent += '  inherit_alpha: true\n';
-    
+
     // Add slice9 based on cornerRadius for [corner] nodes
     if (isCorner && cornerRadius > 0) {
         nodesContent += '  slice9 {\n';
@@ -918,31 +918,31 @@ function createTemplateGui(instanceNode) {
         nodesContent += '    w: 0.0\n';
         nodesContent += '  }\n';
     }
-    
+
     nodesContent += '  clipping_mode: CLIPPING_MODE_NONE\n';
     nodesContent += '  clipping_visible: true\n';
     nodesContent += '  clipping_inverted: false\n';
     nodesContent += '  alpha: 1.0\n';
     nodesContent += '  template_node_child: false\n';
-    
+
     // Use SIZE_MODE_MANUAL for corner nodes OR empty layouts so size works
     if (isCorner || shouldAvoid) {
         nodesContent += '  size_mode: SIZE_MODE_MANUAL\n';
     } else {
         nodesContent += '  size_mode: SIZE_MODE_AUTO\n';
     }
-    
+
     nodesContent += '  custom_type: 0\n';
     nodesContent += '  enabled: true\n';
     nodesContent += '  visible: true\n';
     nodesContent += '  material: ""\n';
     nodesContent += '}\n';
-    
+
     // Parse children - pass instanceNode for correct positioning
     if (instanceNode.children) {
         nodesContent += parseTemplateNodes(instanceNode, templateName, instanceNode);
     }
-    
+
     templateContent += nodesContent;
     templateContent += 'layers {\n';
     templateContent += '   name: "text"\n';
@@ -950,7 +950,7 @@ function createTemplateGui(instanceNode) {
     templateContent += 'material: "/builtins/materials/gui.material"\n';
     templateContent += 'adjust_reference: ADJUST_REFERENCE_PARENT\n';
     templateContent += 'max_nodes: 512\n';
-    
+
     templateGuiFiles.push({
         name: templateName + '.gui',
         content: templateContent
@@ -962,13 +962,13 @@ function parseTemplateNodes(node, parent_name, rootNode) {
     if (!node.children) {
         return '';
     }
-    
+
     var result = '';
-    
+
     for (let child of node.children) {
         if (child.name != "[exclude]") {
             var layerName = child.name.replace(/\[corner\]/g, "");
-            
+
             // Skip primitive shapes - they're exported as part of parent FRAME image
             const primitiveTypes = ['ELLIPSE', 'RECTANGLE', 'POLYGON', 'STAR', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION'];
             if (primitiveTypes.includes(child.type)) {
@@ -979,7 +979,7 @@ function parseTemplateNodes(node, parent_name, rootNode) {
             // Default to Center (for Boxes)
             let hAlign = 'CENTER';
             let vAlign = 'CENTER';
-            
+
             if (child.type === 'TEXT') {
                 hAlign = child.textAlignHorizontal || 'CENTER';
                 vAlign = child.textAlignVertical || 'CENTER';
@@ -1020,30 +1020,30 @@ function parseTemplateNodes(node, parent_name, rootNode) {
 
             // Correct combinations like PIVOT_N (Top-Center) -> suffixH is empty
             // PIVOT_W (Center-Left) -> suffixV is empty
-            
+
             // Calculate Position relative to Parent CENTER
             var parentCenterX = rootNode.width / 2;
             var parentCenterY = rootNode.height / 2;
-            
+
             // posX: offset from parent center
             // posY: offset from parent center (Y flipped)
             var posX = anchorX - parentCenterX;
             var posY = parentCenterY - anchorY;
-            
-            
+
+
             var nodeContent = 'nodes {\n';
             nodeContent += '  position {\n';
             nodeContent += '    x: ' + posX + '\n';
             nodeContent += '    y: ' + posY + '\n';
             nodeContent += '  }\n';
-            
+
             if (child.type === "TEXT") {
                 var textSize = child.fontSize;
                 var text_scale = textSize / max_font_scale;
                 var textWidth = child.width / text_scale;
                 var textHeight = child.height / text_scale;
                 var textContent = child.characters.replace(/\n/g, "\\n");
-                
+
                 const fills = child.fills;
                 var r = 1.0, g = 1.0, b = 1.0;
                 if (fills && fills.length > 0 && fills[0].color) {
@@ -1051,7 +1051,7 @@ function parseTemplateNodes(node, parent_name, rootNode) {
                     g = fills[0].color.g;
                     b = fills[0].color.b;
                 }
-                
+
                 nodeContent += '  size {\n';
                 nodeContent += '    x: ' + textWidth.toFixed(2) + '\n';
                 nodeContent += '    y: ' + textHeight.toFixed(2) + '\n';
@@ -1137,21 +1137,21 @@ function parseTemplateNodes(node, parent_name, rootNode) {
                 nodeContent += '  visible: true\n';
                 nodeContent += '  material: ""\n';
             }
-            
+
             if (parent_name) {
                 nodeContent += '  parent: "' + parent_name + '"\n';
             }
-            
+
             nodeContent += '}\n';
             result += nodeContent;
-            
+
             // Если это FRAME - рекурсивно обработать детей
             if (child.type === "FRAME" && child.children) {
                 result += parseTemplateNodes(child, layerName, rootNode);
             }
         }
     }
-    
+
     return result;
 }
 
@@ -1203,17 +1203,17 @@ function createScriptFile(selection) {
             scriptContent += 'local layout = require("druid.extended.layout")\n';
         }
         scriptContent += '\n';
-        
+
         // Generate callback placeholders
         if (instanceDataForClone.length > 0) {
-             for (let data of instanceDataForClone) {
-                 let instanceId = data.instanceId;
-                 if (instanceId.toLowerCase().includes("button") || instanceId.toLowerCase().includes("btn")) {
-                     scriptContent += 'local function on_' + instanceId + '_click(self)\n';
-                     scriptContent += '    print("' + instanceId + ' clicked!")\n';
-                     scriptContent += 'end\n\n';
-                 }
-             }
+            for (let data of instanceDataForClone) {
+                let instanceId = data.instanceId;
+                if (instanceId.toLowerCase().includes("button") || instanceId.toLowerCase().includes("btn")) {
+                    scriptContent += 'local function on_' + instanceId + '_click(self)\n';
+                    scriptContent += '    print("' + instanceId + ' clicked!")\n';
+                    scriptContent += 'end\n\n';
+                }
+            }
         }
     }
 
@@ -1226,69 +1226,69 @@ function createScriptFile(selection) {
     scriptContent += '    msg.post(".", "acquire_input_focus")\n';
     scriptContent += '    gui.set_render_order(13)\n';
     scriptContent += '\n';
-    
+
     // Initialize layouts
     if (useDruid && layoutContainers.size > 0) {
-         scriptContent += '    -- Initialize layouts\n';
-         for (let [id, data] of layoutContainers) {
-             let mode = data.mode;
-             if (data.isWrap) {
-                 mode += '_wrap';
-             }
-             scriptContent += '    self.layout_' + id + ' = self.druid:new(layout, "' + id + '", "' + mode + '")\n';
-             
-             // Set margin based on orientation
-             if (data.mode === 'vertical') {
-                 scriptContent += '    self.layout_' + id + ':set_margin(0, ' + data.margin + ')\n';
-             } else {
-                 scriptContent += '    self.layout_' + id + ':set_margin(' + data.margin + ', 0)\n';
-             }
-             
-             scriptContent += '    self.layout_' + id + ':set_padding(' + data.padding.left + ', ' + data.padding.top + ', ' + data.padding.right + ', ' + data.padding.bottom + ')\n';
-         }
-         scriptContent += '\n';
+        scriptContent += '    -- Initialize layouts\n';
+        for (let [id, data] of layoutContainers) {
+            let mode = data.mode;
+            if (data.isWrap) {
+                mode += '_wrap';
+            }
+            scriptContent += '    self.layout_' + id + ' = self.druid:new(layout, "' + id + '", "' + mode + '")\n';
+
+            // Set margin based on orientation
+            if (data.mode === 'vertical') {
+                scriptContent += '    self.layout_' + id + ':set_margin(0, ' + data.margin + ')\n';
+            } else {
+                scriptContent += '    self.layout_' + id + ':set_margin(' + data.margin + ', 0)\n';
+            }
+
+            scriptContent += '    self.layout_' + id + ':set_padding(' + data.padding.left + ', ' + data.padding.top + ', ' + data.padding.right + ', ' + data.padding.bottom + ')\n';
+        }
+        scriptContent += '\n';
     }
-    
+
     // Generate code to clone instances from templates
     if (instanceDataForClone.length > 0) {
         scriptContent += '    -- create template instances\n';
         scriptContent += '    self.instances = {}\n'; // Store instances if needed
-        
+
         for (let data of instanceDataForClone) {
             let instanceId = data.instanceId;
             let templateName = data.templateName;
             let isButton = useDruid && (instanceId.toLowerCase().includes("button") || instanceId.toLowerCase().includes("btn"));
-            
+
             scriptContent += '    \n';
-            
+
             // local <instanceId> = gui.clone_tree(gui.get_node("<templateName>/<templateName>"))
             // We clone the root node of the template instance on the scene
             scriptContent += '    local ' + instanceId + ' = gui.clone_tree(gui.get_node("' + templateName + '/' + templateName + '"))\n';
-            
+
             // Store instance
             scriptContent += '    self.instances["' + instanceId + '"] = ' + instanceId + '\n';
-            
+
             // Define root node variable for convenience (templateName/templateName)
             scriptContent += '    local ' + instanceId + '_root = ' + instanceId + '["' + templateName + '/' + templateName + '"]\n';
-            
+
             // gui.set_position(<instanceId>_root, vmath.vector3(x, y, 0)) - only if not in layout
             if (!(useDruid && data.parentName && layoutContainers.has(data.parentName))) {
                 scriptContent += '    gui.set_position(' + instanceId + '_root, vmath.vector3(' + data.x + ', ' + data.y + ', 0))\n';
             }
-            
+
             // gui.set_enabled(<instanceId>_root, true)
             scriptContent += '    gui.set_enabled(' + instanceId + '_root, true)\n';
-            
+
             // Parenting
             if (data.parentName) {
                 scriptContent += '    gui.set_parent(' + instanceId + '_root, gui.get_node("' + data.parentName + '"))\n';
             }
-            
+
             // Add to layout if parent is a layout container and Druid is enabled
             if (useDruid && data.parentName && layoutContainers.has(data.parentName)) {
                 scriptContent += '    self.layout_' + data.parentName + ':add(' + instanceId + '_root)\n';
             }
-            
+
             // Create Druid button if applicable
             if (isButton) {
                 scriptContent += '    self.druid:new_button(' + instanceId + '_root, self.on_' + instanceId + '_click)\n';
@@ -1309,20 +1309,20 @@ function createScriptFile(selection) {
                 if (/[\u0400-\u04FF]/.test(cleanTextContent) || /[a-zA-Z]/.test(cleanTextContent)) {
                     // Create lang key: FRAME_INSTANCEID_TEXT
                     var langKey = frame_name.toUpperCase() + '_' + instanceId.toUpperCase() + '_TEXT';
-                    
+
                     // lang.set(instanceId["templateName/text"], "KEY")
                     scriptContent += '    lang.set(' + instanceId + '["' + textNodePath + '"], "' + langKey + '")\n';
 
                     // Collect for translation
                     var exists = false;
-                    for(var t = 0; t < textsForTranslation.length; t++) {
-                         if(textsForTranslation[t].key === langKey) {
-                             exists = true;
-                             break;
-                         }
+                    for (var t = 0; t < textsForTranslation.length; t++) {
+                        if (textsForTranslation[t].key === langKey) {
+                            exists = true;
+                            break;
+                        }
                     }
                     if (!exists) {
-                         textsForTranslation.push({ key: langKey, text: cleanTextContent });
+                        textsForTranslation.push({ key: langKey, text: cleanTextContent });
                     }
                 } else {
                     // gui.set_text(instanceId["templateName/text"], "content")
@@ -1330,53 +1330,53 @@ function createScriptFile(selection) {
                 }
             }
         }
-        
+
         // Check for "root" and "content" nodes to create scroll
-    if (useDruid) {
-        let hasRoot = false;
-        let hasContent = false;
-        
-        function checkForScrollNodes(node) {
-            // Check exact name match / ignore tags
-            let cleanName = node.name.replace(/\[.*?\]/g, "").trim();
-            if (cleanName === "root") hasRoot = true;
-            if (cleanName === "content") hasContent = true;
-            
-            if (node.children) {
-                for (let child of node.children) {
-                    checkForScrollNodes(child);
+        if (useDruid) {
+            let hasRoot = false;
+            let hasContent = false;
+
+            function checkForScrollNodes(node) {
+                // Check exact name match / ignore tags
+                let cleanName = node.name.replace(/\[.*?\]/g, "").trim();
+                if (cleanName === "root") hasRoot = true;
+                if (cleanName === "content") hasContent = true;
+
+                if (node.children) {
+                    for (let child of node.children) {
+                        checkForScrollNodes(child);
+                    }
                 }
             }
-        }
-        
-        // Check in selection
-        if (selection && selection.length > 0) {
-             for (let node of selection) {
-                 checkForScrollNodes(node);
-             }
-        }
-        
-        if (hasRoot && hasContent) {
-            scriptContent += '    -- Init Scroll\n';
-            scriptContent += '    self.main_scroll = self.druid:new_scroll("root", "content")\n';
-            scriptContent += '    :set_horizontal_scroll(false)\n';
-            scriptContent += '    :set_extra_stretch_size(250)\n';
-            scriptContent += '\n';
-        }
-    }
 
-    // Refresh layouts after adding all elements
+            // Check in selection
+            if (selection && selection.length > 0) {
+                for (let node of selection) {
+                    checkForScrollNodes(node);
+                }
+            }
+
+            if (hasRoot && hasContent) {
+                scriptContent += '    -- Init Scroll\n';
+                scriptContent += '    self.main_scroll = self.druid:new_scroll("root", "content")\n';
+                scriptContent += '    :set_horizontal_scroll(false)\n';
+                scriptContent += '    :set_extra_stretch_size(250)\n';
+                scriptContent += '\n';
+            }
+        }
+
+        // Refresh layouts after adding all elements
         if (useDruid && layoutContainers.size > 0) {
             scriptContent += '\n';
             for (let [id, data] of layoutContainers) {
                 scriptContent += '    self.layout_' + id + ':refresh_layout()\n';
             }
         }
-        
+
         scriptContent += '\n';
     }
 
-    scriptContent += '    popup.set_animation(self, "background")\n';
+    scriptContent += '    popup.set_animation(self, "content")\n';
     scriptContent += 'end\n';
     scriptContent += '\n';
     scriptContent += 'function on_message(self, message_id, message, sender)\n';
@@ -1403,7 +1403,7 @@ function createScriptFile(selection) {
                         // Handle INSTANCE nodes - iterate their children with instanceId prefix
                         if (child.type === "INSTANCE") {
                             // Instance creation and text setting is now handled in init() specific for clones
-                            continue; 
+                            continue;
                         }
 
                         if (child.type == "TEXT") {
@@ -1416,8 +1416,8 @@ function createScriptFile(selection) {
                                 scriptContent += '        lang.set("' + layerName + '", "' + langKey + '")\n';
                                 // Collect for translation
                                 var exists = false;
-                                for(var t = 0; t < textsForTranslation.length; t++) {
-                                    if(textsForTranslation[t].key === langKey) {
+                                for (var t = 0; t < textsForTranslation.length; t++) {
+                                    if (textsForTranslation[t].key === langKey) {
                                         exists = true;
                                         break;
                                     }
@@ -1584,7 +1584,7 @@ function applySettings(s) {
     // target_project = { width: 1080, height: 1920 }; // Keep default or just rely on Frame logic.
     // We don't overwrite it with s.width/s.height here anymore.
     target_project_fonts = s.fonts || target_project_fonts;
-    is_use_background_node = s.useBackground !== false;
+    is_use_content_node = s.useContent !== false;
     max_font_scale = s.maxFontScale || 60;
     apiKey = s.apiKey || "";
     languages = s.languages || "en,ru,de,fr,es,pt,ko,ja";
